@@ -1,0 +1,70 @@
+# rsync --exclude-from patterns for pulling .hermes + workspace off the VM.
+# Excludes secrets, credentials, caches, logs, generated files, downloaded
+# models, build artifacts, and noisy runtime state. Patterns are relative to
+# the rsync source roots (.hermes/ and workspace/).
+
+# ---- Secrets & credentials (NEVER sync) -----------------------------------
+.hermes/.env
+.hermes/**/.env
+.hermes/auth.json
+.hermes/**/auth.json
+.hermes/**/credentials*
+.hermes/**/token*
+.env
+.env.*
+**/.env
+**/.env.*
+
+# ---- Hermes runtime noise -------------------------------------------------
+.hermes/logs/
+.hermes/sessions/
+.hermes/cache/
+.hermes/venvs/
+.hermes/hermes-agent/.venv/
+.hermes/hermes-agent/node_modules/
+.hermes/hermes-agent/dist/
+.hermes/hermes-agent/build/
+.hermes/hermes-agent/.git/
+
+# ---- Workspace build/dep artifacts ----------------------------------------
+workspace/**/node_modules/
+workspace/**/.venv/
+workspace/**/venv/
+workspace/**/__pycache__/
+workspace/**/*.pyc
+workspace/**/.terraform/
+workspace/**/terraform.tfstate
+workspace/**/terraform.tfstate.*
+
+# ---- Workspace secrets ----------------------------------------------------
+workspace/**/*.pem
+workspace/**/*.key
+workspace/**/*secret*
+workspace/**/*credential*
+
+# ---- Generic caches / logs / large & generated artifacts ------------------
+*.log
+logs/
+**/logs/
+.cache/
+**/.cache/
+*.tmp
+# Downloaded models / large archives
+*.gguf
+*.safetensors
+*.bin
+*.pt
+*.onnx
+*.ckpt
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+# Generated SSH keys / SA JSON (defense in depth)
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+google_compute_engine*
+*service-account*.json
+*sa-key*.json

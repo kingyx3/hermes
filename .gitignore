@@ -1,0 +1,69 @@
+# ---------------------------------------------------------------------------
+# Secrets & credentials — NEVER commit
+# ---------------------------------------------------------------------------
+.env
+.env.*
+*.pem
+*.key
+*_rsa
+*_ed25519
+id_ed25519*
+id_rsa*
+google_compute_engine*
+# GCP service-account keys
+gcp-sa-key.json
+*sa-key*.json
+*service-account*.json
+*credential*.json
+auth.json
+
+# ---------------------------------------------------------------------------
+# Terraform
+# ---------------------------------------------------------------------------
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+**/.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+# Generated at CI/CD time — must never be committed
+terraform.auto.tfvars.json
+**/terraform.auto.tfvars.json
+*.auto.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# ---------------------------------------------------------------------------
+# Rendered / generated runtime config (produced by workflows)
+# ---------------------------------------------------------------------------
+hermes.env
+hermes.service
+ssh_config
+inventory.ini
+/tmp-render/
+
+# ---------------------------------------------------------------------------
+# Logs, caches, build artifacts
+# ---------------------------------------------------------------------------
+*.log
+logs/
+.cache/
+__pycache__/
+*.pyc
+node_modules/
+.venv/
+venv/
+dist/
+build/
+
+# ---------------------------------------------------------------------------
+# OS / editor cruft
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp

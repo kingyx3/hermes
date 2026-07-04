@@ -1,0 +1,235 @@
+name: Deploy Hermes Agent
+
+# Manual only. Provisions/updates the Free-Tier VM, installs the official
+# Nous Research Hermes Agent, configures Gemini, installs the systemd service,
+# then strips the temporary external IP and verifies the steady state.
+on:
+  workflow_dispatch:
+    inputs:
+      enable_swap:
+        description: "Create a small swap file on the VM (helps first install on e2-micro)"
+        type: boolean
+        default: false
+      hermes_model:
+        description: "Gemini model id (blank = gemini-flash-latest)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hermes-infra
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Mask secrets in logs
+        run: echo "::add-mask::${{ secrets.GEMINI_API_KEY }}"
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Resolve configuration
+        id: cfg
+        run: |
+          set -euo pipefail
+          # project_id: optional repo var override, else inferred from GCP_SA_KEY JSON.
+          PROJECT_ID="${{ vars.GCP_PROJECT_ID }}"
+          if [ -z "${PROJECT_ID}" ]; then
+            PROJECT_ID="$(jq -r '.project_id' "${GOOGLE_APPLICATION_CREDENTIALS}")"
+          fi
+          [ -n "${PROJECT_ID}" ] && [ "${PROJECT_ID}" != "null" ] || { echo "Could not resolve project_id"; exit 1; }
+
+          REGION="${{ vars.GCP_REGION }}";        REGION="${REGION:-us-central1}"
+          ZONE="${{ vars.GCP_ZONE }}";            ZONE="${ZONE:-us-central1-a}"
+          VM_NAME="${{ vars.GCP_VM_NAME }}";      VM_NAME="${VM_NAME:-hermes-agent}"
+          MACHINE_TYPE="${{ vars.GCP_MACHINE_TYPE }}"; MACHINE_TYPE="${MACHINE_TYPE:-e2-micro}"
+          DISK_SIZE_GB="${{ vars.GCP_DISK_SIZE_GB }}"; DISK_SIZE_GB="${DISK_SIZE_GB:-30}"
+          HERMES_USER="${{ vars.HERMES_USER }}";  HERMES_USER="${HERMES_USER:-hermes}"
+          HERMES_HOME="${{ vars.HERMES_HOME }}";  HERMES_HOME="${HERMES_HOME:-/home/hermes}"
+          HERMES_CONFIG_DIR="${HERMES_HOME}/.hermes"
+          WORKSPACE_DIR="${HERMES_HOME}/workspace"
+          STATE_BUCKET="${PROJECT_ID}-hermes-tfstate"
+
+          {
+            echo "project_id=${PROJECT_ID}"
+            echo "region=${REGION}"
+            echo "zone=${ZONE}"
+            echo "vm_name=${VM_NAME}"
+            echo "machine_type=${MACHINE_TYPE}"
+            echo "disk_size_gb=${DISK_SIZE_GB}"
+            echo "hermes_user=${HERMES_USER}"
+            echo "hermes_home=${HERMES_HOME}"
+            echo "hermes_config_dir=${HERMES_CONFIG_DIR}"
+            echo "workspace_dir=${WORKSPACE_DIR}"
+            echo "state_bucket=${STATE_BUCKET}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Ensure Terraform state bucket
+        run: |
+          set -euo pipefail
+          BUCKET="${{ steps.cfg.outputs.state_bucket }}"
+          if ! gcloud storage buckets describe "gs://${BUCKET}" >/dev/null 2>&1; then
+            gcloud storage buckets create "gs://${BUCKET}" \
+              --project="${{ steps.cfg.outputs.project_id }}" \
+              --location="${{ steps.cfg.outputs.region }}" \
+              --default-storage-class=STANDARD \
+              --uniform-bucket-level-access \
+              --public-access-prevention
+            gcloud storage buckets update "gs://${BUCKET}" --versioning
+          fi
+
+      - name: Generate terraform.auto.tfvars.json (non-secret)
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+          cat > terraform.auto.tfvars.json <<JSON
+          {
+            "project_id": "${{ steps.cfg.outputs.project_id }}",
+            "region": "${{ steps.cfg.outputs.region }}",
+            "zone": "${{ steps.cfg.outputs.zone }}",
+            "vm_name": "${{ steps.cfg.outputs.vm_name }}",
+            "machine_type": "${{ steps.cfg.outputs.machine_type }}",
+            "disk_size_gb": ${{ steps.cfg.outputs.disk_size_gb }},
+            "github_repo": "${{ github.repository }}",
+            "hermes_user": "${{ steps.cfg.outputs.hermes_user }}",
+            "hermes_home": "${{ steps.cfg.outputs.hermes_home }}",
+            "hermes_config_dir": "${{ steps.cfg.outputs.hermes_config_dir }}",
+            "workspace_dir": "${{ steps.cfg.outputs.workspace_dir }}"
+          }
+          JSON
+
+      - name: Terraform init / fmt / validate / plan
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+          terraform init \
+            -backend-config="bucket=${{ steps.cfg.outputs.state_bucket }}" \
+            -backend-config="prefix=terraform/state"
+          terraform fmt -check -recursive
+          terraform validate
+          terraform plan -input=false -var="allow_temporary_external_ip=true"
+
+      - name: Terraform apply (bootstrap — temporary external IP)
+        working-directory: terraform
+        run: terraform apply -input=false -auto-approve -var="allow_temporary_external_ip=true"
+
+      - name: Render env file and systemd unit
+        id: render
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          HERMES_USER: ${{ steps.cfg.outputs.hermes_user }}
+          HERMES_HOME: ${{ steps.cfg.outputs.hermes_home }}
+          HERMES_CONFIG_DIR: ${{ steps.cfg.outputs.hermes_config_dir }}
+          WORKSPACE_DIR: ${{ steps.cfg.outputs.workspace_dir }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/*.sh
+          scripts/render-env.sh >> "${GITHUB_OUTPUT}"
+
+      - name: Establish ephemeral SSH over IAP
+        id: ssh
+        env:
+          VM_NAME: ${{ steps.cfg.outputs.vm_name }}
+          ZONE: ${{ steps.cfg.outputs.zone }}
+          PROJECT_ID: ${{ steps.cfg.outputs.project_id }}
+        run: |
+          set -euo pipefail
+          ENV_FILE="$(scripts/ssh-iap.sh up)"
+          echo "env_file=${ENV_FILE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Provision VM (bootstrap, configure, service)
+        env:
+          HERMES_USER: ${{ steps.cfg.outputs.hermes_user }}
+          HERMES_HOME: ${{ steps.cfg.outputs.hermes_home }}
+          HERMES_CONFIG_DIR: ${{ steps.cfg.outputs.hermes_config_dir }}
+          WORKSPACE_DIR: ${{ steps.cfg.outputs.workspace_dir }}
+          ENABLE_SWAP: ${{ inputs.enable_swap && '1' || '0' }}
+          HERMES_MODEL: ${{ inputs.hermes_model }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1090
+          source "${{ steps.ssh.outputs.env_file }}"
+          SSH="ssh -i ${SSH_KEY} -p ${SSH_PORT} ${SSH_OPTS} ${SSH_USER}@localhost"
+          SCP="scp -i ${SSH_KEY} -P ${SSH_PORT} ${SSH_OPTS}"
+
+          # Wait for sshd to accept connections through the tunnel.
+          for i in $(seq 1 30); do
+            if ${SSH} true 2>/dev/null; then break; fi
+            [ "${i}" = "30" ] && { echo "VM SSH not ready"; exit 1; }
+            sleep 5
+          done
+
+          # Copy helper scripts and rendered files.
+          ${SSH} 'mkdir -p /tmp/hermes-deploy'
+          ${SCP} scripts/bootstrap-vm.sh scripts/configure-hermes.sh \
+                 scripts/install-service.sh scripts/hermes-ops.sh \
+                 "${{ steps.render.outputs.UNIT_FILE }}" \
+                 "${SSH_USER}@localhost:/tmp/hermes-deploy/"
+          # Env file goes to a temp path, then installed root:root 0600.
+          ${SCP} "${{ steps.render.outputs.ENV_FILE }}" "${SSH_USER}@localhost:/tmp/hermes-deploy/hermes.env"
+
+          ${SSH} "sudo install -D -o root -g root -m 0600 /tmp/hermes-deploy/hermes.env /etc/hermes-agent/hermes.env && rm -f /tmp/hermes-deploy/hermes.env"
+
+          # Bootstrap (deps, user, dirs, official installer, cache cleanup).
+          ${SSH} "sudo HERMES_USER='${HERMES_USER}' HERMES_HOME='${HERMES_HOME}' HERMES_CONFIG_DIR='${HERMES_CONFIG_DIR}' WORKSPACE_DIR='${WORKSPACE_DIR}' ENABLE_SWAP='${ENABLE_SWAP}' bash /tmp/hermes-deploy/bootstrap-vm.sh"
+
+          # Configure Gemini provider/model.
+          MODEL_ARG=""
+          [ -n "${HERMES_MODEL}" ] && MODEL_ARG="HERMES_MODEL='${HERMES_MODEL}'"
+          ${SSH} "sudo HERMES_USER='${HERMES_USER}' HERMES_HOME='${HERMES_HOME}' HERMES_CONFIG_DIR='${HERMES_CONFIG_DIR}' ${MODEL_ARG} bash /tmp/hermes-deploy/configure-hermes.sh"
+
+          # Install the ops helper, then install/restart the service.
+          ${SSH} "sudo install -m 0755 /tmp/hermes-deploy/hermes-ops.sh /usr/local/bin/hermes-ops"
+          ${SSH} "sudo RENDERED_UNIT=/tmp/hermes-deploy/hermes.service bash /tmp/hermes-deploy/install-service.sh"
+
+          # Health check (best-effort; never prints the key).
+          ${SSH} "sudo HERMES_USER='${HERMES_USER}' HERMES_HOME='${HERMES_HOME}' HERMES_CONFIG_DIR='${HERMES_CONFIG_DIR}' bash /usr/local/bin/hermes-ops doctor" || echo "hermes doctor reported issues (non-fatal)"
+
+          # Remove copied scripts from the VM.
+          ${SSH} 'rm -rf /tmp/hermes-deploy'
+
+      - name: Tear down ephemeral SSH
+        if: always()
+        env:
+          VM_NAME: ${{ steps.cfg.outputs.vm_name }}
+          ZONE: ${{ steps.cfg.outputs.zone }}
+          PROJECT_ID: ${{ steps.cfg.outputs.project_id }}
+        run: scripts/ssh-iap.sh down || true
+
+      - name: Terraform apply (steady state — remove external IP)
+        working-directory: terraform
+        run: terraform apply -input=false -auto-approve -var="allow_temporary_external_ip=false"
+
+      - name: Verify no external IP remains
+        run: |
+          set -euo pipefail
+          IP="$(gcloud compute instances describe '${{ steps.cfg.outputs.vm_name }}' \
+                  --zone='${{ steps.cfg.outputs.zone }}' \
+                  --project='${{ steps.cfg.outputs.project_id }}' \
+                  --format='value(networkInterfaces[0].accessConfigs[0].natIP)' 2>/dev/null || true)"
+          if [ -n "${IP}" ]; then
+            echo "FAIL: VM still has an external IP (${IP})."
+            exit 1
+          fi
+          echo "OK: VM has no external IPv4 (Free-Tier steady state)."
+
+      - name: Clean up runner secrets
+        if: always()
+        run: rm -rf "${RUNNER_TEMP}/hermes-render" "${RUNNER_TEMP}/hermes-ssh" terraform/terraform.auto.tfvars.json || true

@@ -1,0 +1,111 @@
+name: Destroy Hermes Infrastructure
+
+# DANGER: tears down all Terraform-managed resources for this project. Gated by
+# a typed confirmation. Does NOT delete the Terraform state bucket (delete it
+# manually afterward if you want a fully clean slate — see README).
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "destroy" to confirm'
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hermes-infra
+  cancel-in-progress: false
+
+jobs:
+  destroy:
+    if: ${{ inputs.confirm == 'destroy' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Resolve configuration
+        id: cfg
+        run: |
+          set -euo pipefail
+          PROJECT_ID="${{ vars.GCP_PROJECT_ID }}"
+          if [ -z "${PROJECT_ID}" ]; then
+            PROJECT_ID="$(jq -r '.project_id' "${GOOGLE_APPLICATION_CREDENTIALS}")"
+          fi
+          [ -n "${PROJECT_ID}" ] && [ "${PROJECT_ID}" != "null" ] || { echo "Could not resolve project_id"; exit 1; }
+          REGION="${{ vars.GCP_REGION }}";        REGION="${REGION:-us-central1}"
+          ZONE="${{ vars.GCP_ZONE }}";            ZONE="${ZONE:-us-central1-a}"
+          VM_NAME="${{ vars.GCP_VM_NAME }}";      VM_NAME="${VM_NAME:-hermes-agent}"
+          MACHINE_TYPE="${{ vars.GCP_MACHINE_TYPE }}"; MACHINE_TYPE="${MACHINE_TYPE:-e2-micro}"
+          DISK_SIZE_GB="${{ vars.GCP_DISK_SIZE_GB }}"; DISK_SIZE_GB="${DISK_SIZE_GB:-30}"
+          HERMES_USER="${{ vars.HERMES_USER }}";  HERMES_USER="${HERMES_USER:-hermes}"
+          HERMES_HOME="${{ vars.HERMES_HOME }}";  HERMES_HOME="${HERMES_HOME:-/home/hermes}"
+          {
+            echo "project_id=${PROJECT_ID}"
+            echo "region=${REGION}"
+            echo "zone=${ZONE}"
+            echo "vm_name=${VM_NAME}"
+            echo "machine_type=${MACHINE_TYPE}"
+            echo "disk_size_gb=${DISK_SIZE_GB}"
+            echo "hermes_user=${HERMES_USER}"
+            echo "hermes_home=${HERMES_HOME}"
+            echo "hermes_config_dir=${HERMES_HOME}/.hermes"
+            echo "workspace_dir=${HERMES_HOME}/workspace"
+            echo "state_bucket=${PROJECT_ID}-hermes-tfstate"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Generate terraform.auto.tfvars.json (non-secret)
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+          cat > terraform.auto.tfvars.json <<JSON
+          {
+            "project_id": "${{ steps.cfg.outputs.project_id }}",
+            "region": "${{ steps.cfg.outputs.region }}",
+            "zone": "${{ steps.cfg.outputs.zone }}",
+            "vm_name": "${{ steps.cfg.outputs.vm_name }}",
+            "machine_type": "${{ steps.cfg.outputs.machine_type }}",
+            "disk_size_gb": ${{ steps.cfg.outputs.disk_size_gb }},
+            "github_repo": "${{ github.repository }}",
+            "hermes_user": "${{ steps.cfg.outputs.hermes_user }}",
+            "hermes_home": "${{ steps.cfg.outputs.hermes_home }}",
+            "hermes_config_dir": "${{ steps.cfg.outputs.hermes_config_dir }}",
+            "workspace_dir": "${{ steps.cfg.outputs.workspace_dir }}"
+          }
+          JSON
+
+      - name: Terraform destroy
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+          terraform init \
+            -backend-config="bucket=${{ steps.cfg.outputs.state_bucket }}" \
+            -backend-config="prefix=terraform/state"
+          terraform destroy -input=false -auto-approve -var="allow_temporary_external_ip=false"
+
+      - name: Post-destroy resource audit
+        run: |
+          set -euo pipefail
+          echo "Remaining project resources that could incur charges:"
+          gcloud compute instances list --project='${{ steps.cfg.outputs.project_id }}' || true
+          gcloud compute disks list --project='${{ steps.cfg.outputs.project_id }}' || true
+          gcloud compute addresses list --project='${{ steps.cfg.outputs.project_id }}' || true
+
+      - name: Clean up runner files
+        if: always()
+        run: rm -f terraform/terraform.auto.tfvars.json || true
