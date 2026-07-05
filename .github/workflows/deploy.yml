@@ -39,6 +39,9 @@ jobs:
         run: |
           echo "::add-mask::${{ secrets.GEMINI_API_KEY }}"
           echo "::add-mask::${{ secrets.TELEGRAM_BOT_TOKEN }}"
+          echo "::add-mask::${{ secrets.TELEGRAM_ALLOWED_USERS }}"
+          echo "::add-mask::${{ secrets.TELEGRAM_GROUP_ALLOWED_USERS }}"
+          echo "::add-mask::${{ secrets.TELEGRAM_GROUP_ALLOWED_CHATS }}"
           # HERMES_EXTRA_SECRETS is multi-line/arbitrary; GitHub Actions already
           # auto-masks any verbatim occurrence of a secrets.* value in logs, and
           # render-env.sh never echoes it, so no extra per-line masking is added.
@@ -257,11 +260,12 @@ jobs:
           HERMES_CONFIG_DIR: ${{ steps.cfg.outputs.hermes_config_dir }}
           WORKSPACE_DIR: ${{ steps.cfg.outputs.workspace_dir }}
           # Telegram gateway (all optional; blank = Telegram stays disabled).
-          # See docs/security.md for the TELEGRAM_ALLOWED_USERS recommendation.
+          # Prefer GitHub Actions Variables for allowlists. Secrets are accepted
+          # as a fallback so an allowlist saved there does not render as blank.
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_ALLOWED_USERS: ${{ vars.TELEGRAM_ALLOWED_USERS }}
-          TELEGRAM_GROUP_ALLOWED_USERS: ${{ vars.TELEGRAM_GROUP_ALLOWED_USERS }}
-          TELEGRAM_GROUP_ALLOWED_CHATS: ${{ vars.TELEGRAM_GROUP_ALLOWED_CHATS }}
+          TELEGRAM_ALLOWED_USERS: ${{ vars.TELEGRAM_ALLOWED_USERS || secrets.TELEGRAM_ALLOWED_USERS }}
+          TELEGRAM_GROUP_ALLOWED_USERS: ${{ vars.TELEGRAM_GROUP_ALLOWED_USERS || secrets.TELEGRAM_GROUP_ALLOWED_USERS }}
+          TELEGRAM_GROUP_ALLOWED_CHATS: ${{ vars.TELEGRAM_GROUP_ALLOWED_CHATS || secrets.TELEGRAM_GROUP_ALLOWED_CHATS }}
           TELEGRAM_HOME_CHANNEL: ${{ vars.TELEGRAM_HOME_CHANNEL }}
           TELEGRAM_REACTIONS: ${{ vars.TELEGRAM_REACTIONS }}
           # Generic escape hatch so any other Hermes runtime config (model
