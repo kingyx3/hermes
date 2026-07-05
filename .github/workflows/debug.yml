@@ -1,9 +1,9 @@
 name: Debug Hermes Agent
 
 # Manual only. Opens an ephemeral SSH-over-IAP session to the VM, runs one
-# read-only (or restart) operational command via the installed `hermes-ops`
-# helper, prints the result in this run's log, then tears the session down.
-# No secrets are read by this workflow -- it never touches GEMINI_API_KEY,
+# safe operational command via the installed `hermes-ops` helper, prints the
+# result in this run's log, then tears the session down. No application secrets
+# are read by this workflow -- it never touches GEMINI_API_KEY,
 # TELEGRAM_BOT_TOKEN, etc.; it only inspects/controls the already-running
 # service on the VM.
 #
@@ -17,15 +17,21 @@ on:
         description: "Operation to run on the VM"
         type: choice
         options:
+          - summary
           - logs
           - status
           - journal-boot
           - env-check
+          - disk
+          - memory
           - doctor
           - restart
-        default: logs
+          - start
+          - stop
+          - update
+        default: summary
       lines:
-        description: "Number of log lines to tail (only used by 'logs')"
+        description: "Number of log lines to tail (used by logs/summary)"
         type: string
         default: "200"
 
@@ -100,6 +106,19 @@ jobs:
           LINES: ${{ inputs.lines }}
         run: |
           set -euo pipefail
+          if ! [[ "${LINES}" =~ ^[0-9]+$ ]]; then
+            echo "lines must be a positive integer" >&2
+            exit 1
+          fi
+          if [ "${LINES}" -lt 1 ] || [ "${LINES}" -gt 2000 ]; then
+            echo "lines must be between 1 and 2000" >&2
+            exit 1
+          fi
+          case "${ACTION}" in
+            summary|logs|status|journal-boot|env-check|disk|memory|doctor|restart|start|stop|update) ;;
+            *) echo "Unsupported action: ${ACTION}" >&2; exit 2 ;;
+          esac
+
           # shellcheck disable=SC1090
           source "${{ steps.ssh.outputs.env_file }}"
           SSH="ssh -i ${SSH_KEY} -p ${SSH_PORT} ${SSH_OPTS} ${SSH_USER}@localhost"
@@ -110,7 +129,7 @@ jobs:
             sleep 5
           done
 
-          ${SSH} "sudo HERMES_USER='${HERMES_USER}' HERMES_HOME='${HERMES_HOME}' HERMES_CONFIG_DIR='${HERMES_CONFIG_DIR}' LINES='${LINES}' bash /usr/local/bin/hermes-ops ${ACTION}"
+          ${SSH} "sudo HERMES_USER='${HERMES_USER}' HERMES_HOME='${HERMES_HOME}' HERMES_CONFIG_DIR='${HERMES_CONFIG_DIR}' LINES='${LINES}' bash /usr/local/bin/hermes-ops '${ACTION}'"
 
       - name: Tear down ephemeral SSH
         if: always()
