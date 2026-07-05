@@ -28,9 +28,39 @@
 
 ## Service won't start
 
-- `sudo journalctl -u hermes-agent -n 200` (or `hermes-ops logs`).
+- `sudo journalctl -u hermes-agent -n 200` (or `hermes-ops logs`, or the
+  **Debug Hermes Agent** workflow with `action=logs`/`journal-boot` if you'd
+  rather not SSH in by hand).
 - Verify the binary path: `ls -l /home/hermes/.local/bin/hermes`.
 - Re-run `hermes-ops doctor`.
+- If the unit fails immediately with an "unknown command" style error, the
+  `ExecStart` line may be stale (there is no `hermes gateway run` subcommand,
+  only `hermes gateway`) — confirm
+  `sudo systemctl cat hermes-agent | grep ExecStart` shows `hermes gateway`
+  with nothing after it, and re-run Deploy if not.
+
+## Telegram bot doesn't come online / doesn't respond
+
+- Confirm the token reached the VM without printing it:
+  `hermes-ops env-check` (or the **Debug Hermes Agent** workflow,
+  `action=env-check`) should list `TELEGRAM_BOT_TOKEN`.
+- `hermes gateway` auto-activates Telegram purely from `TELEGRAM_BOT_TOKEN`
+  being present — no `config.yaml` change is needed. If it's missing, the
+  GitHub secret wasn't set, or Deploy hasn't been re-run since it was added.
+- If the bot is online in DMs but silent in a group, Telegram's **privacy
+  mode** is likely blocking it — disable it via BotFather (`/mybots` → Bot
+  Settings → Group Privacy → Turn off) and re-add the bot to the group, or
+  promote it to group admin.
+- If nobody can get a response at all, check `TELEGRAM_ALLOWED_USERS` is set
+  to your numeric Telegram user ID (from `@userinfobot`), not your
+  `@username`.
+
+## I want to check on / debug the VM without SSHing in manually
+
+- Use the **Debug Hermes Agent** workflow (Actions → Debug Hermes Agent → Run
+  workflow): `status`, `logs`, `journal-boot`, `env-check`, `doctor`, or
+  `restart`. It requires Deploy to have run at least once (it relies on the
+  IAP/OS-Login IAM bindings Deploy self-grants).
 
 ## Sync commits nothing
 

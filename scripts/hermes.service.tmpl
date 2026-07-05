@@ -15,10 +15,13 @@ EnvironmentFile=/etc/hermes-agent/hermes.env
 Environment=HERMES_HOME=${HERMES_CONFIG_DIR}
 Environment=PATH=${HERMES_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin
 
-# Unattended background entrypoint. `hermes gateway run` runs in the foreground
-# and works without any messaging platform (standalone, bound to localhost) —
-# suitable for a Type=simple service. It does NOT open a public listener.
-ExecStart=${HERMES_HOME}/.local/bin/hermes gateway run
+# Unattended background entrypoint. `hermes gateway` (no subcommand) runs the
+# messaging gateway in the foreground -- there is no `gateway run` subcommand.
+# It activates any platform (e.g. Telegram) purely from env vars being present
+# (TELEGRAM_BOT_TOKEN, etc., via the EnvironmentFile below) and works with no
+# platform configured too (standalone, bound to localhost) -- suitable for a
+# Type=simple service. It does NOT open a public listener.
+ExecStart=${HERMES_HOME}/.local/bin/hermes gateway
 
 # Conservative restart policy for a small Free-Tier VM.
 Restart=on-failure

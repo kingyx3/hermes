@@ -27,13 +27,16 @@
 The VM is a **thin persistent runtime host**. It only:
 
 - runs the official Nous Research Hermes Agent as `hermes-agent.service`
-  (`hermes gateway run`, unattended, localhost-only, no public listener);
+  (`hermes gateway`, unattended, localhost-only, no public listener; picks up
+  Telegram and any other messaging platform purely from env vars in
+  `hermes.env` — see the root README's "Telegram (optional)" section);
 - stores runtime state under `/home/hermes/.hermes`;
 - stores workspace files under `/home/hermes/workspace`;
 - holds `/etc/hermes-agent/hermes.env` (root:root, 0600);
 - runs minimal OS packages and writes size-capped journald logs;
 - answers lightweight ops commands via `hermes-ops` (start/stop/restart/
-  status/logs/doctor/update).
+  status/logs/journal-boot/env-check/doctor/update), invokable remotely via
+  the **Debug Hermes Agent** workflow.
 
 **Everything else runs on GitHub Actions runners**: Terraform, config
 rendering, ephemeral SSH, rsync, diffing, commits/pushes, verification. The VM
