@@ -18,11 +18,58 @@ HERMES_USER="${HERMES_USER:-hermes}"
 HERMES_HOME="${HERMES_HOME:-/home/hermes}"
 HERMES_CONFIG_DIR="${HERMES_CONFIG_DIR:-${HERMES_HOME}/.hermes}"
 WORKSPACE_DIR="${WORKSPACE_DIR:-${HERMES_HOME}/workspace}"
+HERMES_STATE_DIR="${HERMES_CONFIG_DIR}/state"
 # Set ENABLE_SWAP=1 to create a small swap file (helps the 1 GB e2-micro during
 # the one-time install). Off by default; see README for the tradeoff.
 ENABLE_SWAP="${ENABLE_SWAP:-0}"
 
 log() { printf '[bootstrap] %s\n' "$*"; }
+
+install_hermes_venv_package_if_missing() {
+  local import_name="$1"
+  local package_name="$2"
+  local python_bin=""
+  local candidate
+
+  for candidate in \
+    "${HERMES_CONFIG_DIR}/hermes-agent/venv/bin/python" \
+    "${HERMES_CONFIG_DIR}/hermes-agent/.venv/bin/python"; do
+    if sudo -u "${HERMES_USER}" test -x "${candidate}"; then
+      python_bin="${candidate}"
+      break
+    fi
+  done
+
+  if [ -z "${python_bin}" ]; then
+    log "Hermes venv python not found; skipping optional ${package_name} install."
+    return 0
+  fi
+
+  if sudo -u "${HERMES_USER}" \
+      HERMES_HOME="${HERMES_CONFIG_DIR}" \
+      HOME="${HERMES_HOME}" \
+      "${python_bin}" -c "import ${import_name}" >/dev/null 2>&1; then
+    log "Optional Python package ${package_name} already installed."
+    return 0
+  fi
+
+  log "Installing optional Python package ${package_name} for free web search fallback..."
+  sudo -u "${HERMES_USER}" \
+    HERMES_HOME="${HERMES_CONFIG_DIR}" \
+    HOME="${HERMES_HOME}" \
+    "${python_bin}" -m pip --version >/dev/null 2>&1 \
+    || sudo -u "${HERMES_USER}" \
+      HERMES_HOME="${HERMES_CONFIG_DIR}" \
+      HOME="${HERMES_HOME}" \
+      "${python_bin}" -m ensurepip --upgrade >/dev/null 2>&1 \
+    || true
+
+  sudo -u "${HERMES_USER}" \
+    HERMES_HOME="${HERMES_CONFIG_DIR}" \
+    HOME="${HERMES_HOME}" \
+    "${python_bin}" -m pip install --quiet "${package_name}" \
+    || log "WARNING: Could not install optional ${package_name}; web-search tools may stay disabled until a web backend key is configured."
+}
 
 # --- 1. Minimal OS packages -------------------------------------------------
 log "Installing minimal OS dependencies..."
@@ -58,6 +105,7 @@ fi
 log "Ensuring directories and ownership..."
 sudo install -d -o "${HERMES_USER}" -g "${HERMES_USER}" -m 0755 "${HERMES_HOME}"
 sudo install -d -o "${HERMES_USER}" -g "${HERMES_USER}" -m 0700 "${HERMES_CONFIG_DIR}"
+sudo install -d -o "${HERMES_USER}" -g "${HERMES_USER}" -m 0700 "${HERMES_STATE_DIR}"
 sudo install -d -o "${HERMES_USER}" -g "${HERMES_USER}" -m 0755 "${WORKSPACE_DIR}"
 
 # --- 4. Install the official Hermes Agent (as the hermes user) ---------------
@@ -69,8 +117,14 @@ else
   sudo -u "${HERMES_USER}" \
     HERMES_HOME="${HERMES_CONFIG_DIR}" \
     HOME="${HERMES_HOME}" \
+    XDG_STATE_HOME="${HERMES_STATE_DIR}" \
     bash -c 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --non-interactive --skip-setup --skip-browser'
 fi
+
+# Hermes' default web toolset can use ddgs as a no-key/free search fallback.
+# Installing it avoids doctor reporting missing web API keys on a Telegram VM
+# that only needs Gemini for the model.
+install_hermes_venv_package_if_missing ddgs ddgs
 
 # --- 5. Trim caches to keep the disk small ----------------------------------
 log "Cleaning package-manager caches..."
