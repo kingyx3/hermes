@@ -24,21 +24,47 @@
   never open to `0.0.0.0/0`.
 - Hermes runs localhost-only; no public service listener.
 
-## Least-privilege GCP IAM
+## GCP IAM
 
-The CI service account (`GCP_SA_KEY`) needs, at minimum:
+The deploy workflow is **self-bootstrapping**: at the start of each run it
+enables the APIs it needs and self-grants its operational roles. The CI service
+account (`GCP_SA_KEY`) therefore needs only **two seed roles**, granted once by a
+project Owner:
 
-- `roles/compute.instanceAdmin.v1` — create/manage the VM
-- `roles/compute.networkAdmin` — VPC/subnet
-- `roles/compute.securityAdmin` — firewall + instance IAM bindings
-- `roles/iam.serviceAccountUser` — attach the VM service account
-- `roles/iap.tunnelResourceAccessor` — IAP SSH (also bound at instance level by TF)
-- `roles/storage.admin` — create/use the Terraform state bucket (or
-  `roles/storage.objectAdmin` if you pre-create the bucket)
+- `roles/serviceusage.serviceUsageAdmin` — enable required APIs (Cloud Resource
+  Manager, Service Usage, Compute, IAM, IAP, OS Login)
+- `roles/resourcemanager.projectIamAdmin` — self-grant the operational roles
 
-Broader `roles/editor` works as a **temporary bootstrap shortcut**, but move to
-the least-privilege set above for steady state. The VM's own service account
-holds no project roles (only `logging-write`/`monitoring-write` scopes).
+The **Bootstrap deploy service account IAM roles** step then self-grants:
+
+- `roles/storage.admin` — create/use the Terraform state bucket + remote state
+- `roles/compute.admin` — VPC/subnet/firewall/instance + instance IAM bindings
+- `roles/iam.serviceAccountAdmin` — create the VM's dedicated service account
+- `roles/iam.serviceAccountUser` — attach that service account to the VM
+- `roles/iap.admin` — IAP tunnel instance IAM + opening the SSH tunnel
+- `roles/compute.osAdminLogin` — SSH into the VM as an OS Login admin
+
+**Security tradeoff.** `roles/resourcemanager.projectIamAdmin` lets the SA grant
+itself (or anyone) any role, so a leaked `GCP_SA_KEY` is effectively project
+admin. That is the cost of a hands-off, self-contained pipeline.
+
+**Least-privilege alternative (no self-granting).** Grant the SA only the
+operational roles directly, pre-enable the APIs (see the root `README.md`
+setup), then remove the `Enable required GCP APIs` and `Bootstrap deploy service
+account IAM roles` steps from `.github/workflows/deploy.yml`. Minimal
+operational set:
+
+- `roles/compute.admin` — or the narrower `roles/compute.instanceAdmin.v1` +
+  `roles/compute.networkAdmin` + `roles/compute.securityAdmin`
+- `roles/iam.serviceAccountAdmin` + `roles/iam.serviceAccountUser`
+- `roles/iap.tunnelResourceAccessor` — IAP SSH (Terraform also binds this and
+  `roles/compute.osAdminLogin` at the instance level, so project-level IAP admin
+  is not required)
+- `roles/storage.admin` — Terraform state bucket (or `roles/storage.objectAdmin`
+  if you pre-create the bucket)
+
+The VM's own service account holds no project roles (only
+`logging-write`/`monitoring-write` scopes).
 
 ## Rotation & cleanup
 

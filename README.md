@@ -103,37 +103,44 @@ override defaults; workflows work fine without them:
 
 ## GCP service account & IAM
 
-Create a **minimally privileged** CI service account. Least-privilege roles:
+The deploy workflow is **self-bootstrapping**: on each run it enables the GCP
+APIs it needs and self-grants its operational IAM roles. The CI service account
+therefore needs only **two seed roles**, granted once by a project Owner:
 
-- `roles/compute.instanceAdmin.v1`
-- `roles/compute.networkAdmin`
-- `roles/compute.securityAdmin`
-- `roles/iam.serviceAccountUser`
-- `roles/iap.tunnelResourceAccessor`
-- `roles/storage.admin` (for the Terraform state bucket; or pre-create the
-  bucket and grant only `roles/storage.objectAdmin`)
+- `roles/serviceusage.serviceUsageAdmin` — enable the required APIs (including
+  Cloud Resource Manager, which project IAM changes are served by)
+- `roles/resourcemanager.projectIamAdmin` — self-grant the operational roles below
 
-> `roles/editor` works as a **temporary bootstrap shortcut**, but switch to the
-> least-privilege set for steady state. Full details in
-> [`docs/security.md`](docs/security.md).
+With those, the **Bootstrap deploy service account IAM roles** step grants the
+SA the rest of what the deploy uses: `roles/storage.admin` (state bucket +
+remote state), `roles/compute.admin` (VPC/subnet/firewall/instance + instance
+IAM), `roles/iam.serviceAccountAdmin` + `roles/iam.serviceAccountUser` (create
+and attach the VM's SA), `roles/iap.admin` (IAP tunnel IAM + SSH tunnel), and
+`roles/compute.osAdminLogin` (SSH via OS Login).
+
+> `roles/resourcemanager.projectIamAdmin` lets the SA grant itself any role, so a
+> leaked key is high-impact. To run without self-granting privileges, pre-grant
+> the operational set and drop the bootstrap/enable steps — see the
+> least-privilege alternative in [`docs/security.md`](docs/security.md).
 
 ## One-time setup
 
 ```bash
-# 1. Create the CI service account + key
+# 1. Create the CI service account + key, granting only the two seed roles.
+#    The deploy self-grants the operational roles (and enables APIs) on each run.
 gcloud iam service-accounts create hermes-ci --display-name="Hermes CI"
 SA="hermes-ci@${PROJECT_ID}.iam.gserviceaccount.com"
-for R in roles/compute.instanceAdmin.v1 roles/compute.networkAdmin \
-         roles/compute.securityAdmin roles/iam.serviceAccountUser \
-         roles/iap.tunnelResourceAccessor roles/storage.admin; do
+for R in roles/serviceusage.serviceUsageAdmin \
+         roles/resourcemanager.projectIamAdmin; do
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${SA}" --role="${R}"
 done
 gcloud iam service-accounts keys create sa-key.json --iam-account="${SA}"
 
-# 2. Enable required APIs
-gcloud services enable compute.googleapis.com iap.googleapis.com \
-  iam.googleapis.com storage.googleapis.com
+# 2. (Optional) The deploy enables required APIs itself via serviceUsageAdmin.
+#    To pre-enable them anyway:
+gcloud services enable cloudresourcemanager.googleapis.com serviceusage.googleapis.com \
+  compute.googleapis.com iam.googleapis.com iap.googleapis.com oslogin.googleapis.com
 
 # 3. Add GitHub secrets (via the UI, or gh):
 #    GCP_SA_KEY   = contents of sa-key.json
