@@ -97,7 +97,8 @@ if [ -n "${TELEGRAM_BOT_TOKEN}" ] && \
    [ -z "${TELEGRAM_GROUP_ALLOWED_USERS}" ] && \
    [ -z "${TELEGRAM_GROUP_ALLOWED_CHATS}" ]; then
   echo "[render-env] ERROR: TELEGRAM_BOT_TOKEN is set but no Telegram allowlist is configured." >&2
-  echo "[render-env] Set TELEGRAM_ALLOWED_USERS, TELEGRAM_GROUP_ALLOWED_USERS, or TELEGRAM_GROUP_ALLOWED_CHATS before deploying." >&2
+  echo "[render-env] Set TELEGRAM_ALLOWED_USERS to your numeric Telegram user ID, not your @username." >&2
+  echo "[render-env] For groups, set TELEGRAM_GROUP_ALLOWED_USERS or TELEGRAM_GROUP_ALLOWED_CHATS." >&2
   exit 1
 fi
 
