@@ -337,7 +337,7 @@ jobs:
           HERMES_CONFIG_DIR: ${{ steps.cfg.outputs.hermes_config_dir }}
           WORKSPACE_DIR: ${{ steps.cfg.outputs.workspace_dir }}
           ENABLE_SWAP: ${{ github.event_name == 'workflow_dispatch' && inputs.enable_swap && '1' || '0' }}
-          HERMES_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.hermes_model || '' }}
+          HERMES_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.hermes_model || vars.HERMES_MODEL || '' }}
         run: |
           set -euo pipefail
           # shellcheck disable=SC1090
