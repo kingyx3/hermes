@@ -19,6 +19,7 @@ HERMES_HOME="${HERMES_HOME:-/home/hermes}"
 HERMES_CONFIG_DIR="${HERMES_CONFIG_DIR:-${HERMES_HOME}/.hermes}"
 WORKSPACE_DIR="${WORKSPACE_DIR:-${HERMES_HOME}/workspace}"
 HERMES_STATE_DIR="${HERMES_CONFIG_DIR}/state"
+HERMES_GATEWAY_LOCK_DIR="${HERMES_STATE_DIR}/hermes/gateway-locks"
 # Set ENABLE_SWAP=1 to create a small swap file (helps the 1 GB e2-micro during
 # the one-time install). Off by default; see README for the tradeoff.
 ENABLE_SWAP="${ENABLE_SWAP:-0}"
@@ -48,6 +49,7 @@ install_hermes_venv_package_if_missing() {
   if sudo -u "${HERMES_USER}" \
       HERMES_HOME="${HERMES_CONFIG_DIR}" \
       HOME="${HERMES_HOME}" \
+      HERMES_GATEWAY_LOCK_DIR="${HERMES_GATEWAY_LOCK_DIR}" \
       "${python_bin}" -c "import ${import_name}" >/dev/null 2>&1; then
     log "Optional Python package ${package_name} already installed."
     return 0
@@ -57,16 +59,19 @@ install_hermes_venv_package_if_missing() {
   sudo -u "${HERMES_USER}" \
     HERMES_HOME="${HERMES_CONFIG_DIR}" \
     HOME="${HERMES_HOME}" \
+    HERMES_GATEWAY_LOCK_DIR="${HERMES_GATEWAY_LOCK_DIR}" \
     "${python_bin}" -m pip --version >/dev/null 2>&1 \
     || sudo -u "${HERMES_USER}" \
       HERMES_HOME="${HERMES_CONFIG_DIR}" \
       HOME="${HERMES_HOME}" \
+      HERMES_GATEWAY_LOCK_DIR="${HERMES_GATEWAY_LOCK_DIR}" \
       "${python_bin}" -m ensurepip --upgrade >/dev/null 2>&1 \
     || true
 
   sudo -u "${HERMES_USER}" \
     HERMES_HOME="${HERMES_CONFIG_DIR}" \
     HOME="${HERMES_HOME}" \
+    HERMES_GATEWAY_LOCK_DIR="${HERMES_GATEWAY_LOCK_DIR}" \
     "${python_bin}" -m pip install --quiet "${package_name}" \
     || log "WARNING: Could not install optional ${package_name}; web-search tools may stay disabled until a web backend key is configured."
 }
@@ -106,6 +111,7 @@ log "Ensuring directories and ownership..."
 sudo install -d -o "${HERMES_USER}" -g "${HERMES_USER}" -m 0755 "${HERMES_HOME}"
 sudo install -d -o "${HERMES_USER}" -g "${HERMES_USER}" -m 0700 "${HERMES_CONFIG_DIR}"
 sudo install -d -o "${HERMES_USER}" -g "${HERMES_USER}" -m 0700 "${HERMES_STATE_DIR}"
+sudo install -d -o "${HERMES_USER}" -g "${HERMES_USER}" -m 0700 "${HERMES_GATEWAY_LOCK_DIR}"
 sudo install -d -o "${HERMES_USER}" -g "${HERMES_USER}" -m 0755 "${WORKSPACE_DIR}"
 
 # --- 4. Install the official Hermes Agent (as the hermes user) ---------------
@@ -118,6 +124,7 @@ else
     HERMES_HOME="${HERMES_CONFIG_DIR}" \
     HOME="${HERMES_HOME}" \
     XDG_STATE_HOME="${HERMES_STATE_DIR}" \
+    HERMES_GATEWAY_LOCK_DIR="${HERMES_GATEWAY_LOCK_DIR}" \
     bash -c 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --non-interactive --skip-setup --skip-browser'
 fi
 
