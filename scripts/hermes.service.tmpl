@@ -3,6 +3,8 @@ Description=Nous Research Hermes Agent (unattended gateway)
 Documentation=https://github.com/nousresearch/hermes-agent
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -13,6 +15,7 @@ WorkingDirectory=${WORKSPACE_DIR}
 # Runtime env: Gemini key + Hermes locations. Root-owned, mode 0600.
 EnvironmentFile=/etc/hermes-agent/hermes.env
 Environment=HERMES_HOME=${HERMES_CONFIG_DIR}
+Environment=XDG_STATE_HOME=${HERMES_CONFIG_DIR}/state
 Environment=PATH=${HERMES_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 # Unattended background entrypoint. `hermes gateway` (no subcommand) runs the
@@ -26,8 +29,6 @@ ExecStart=${HERMES_HOME}/.local/bin/hermes gateway
 # Conservative restart policy for a small Free-Tier VM.
 Restart=on-failure
 RestartSec=10
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
 # Log to journald (journald size caps are configured in install-service.sh).
 StandardOutput=journal
