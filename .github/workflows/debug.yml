@@ -33,8 +33,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: hermes-debug
-  cancel-in-progress: true
+  # Shares deploy.yml/destroy.yml/sync.yml's group: all four touch the same
+  # VM/SSH session, so they must queue rather than run concurrently (e.g. a
+  # "restart" here mid-way through a live Deploy apply, or racing sync.yml's
+  # rsync against a Deploy that is actively rewriting files). cancel-in-progress
+  # must stay false here too -- true would let a debug run cancel a live
+  # Terraform apply/destroy queued in the same group.
+  group: hermes-infra
+  cancel-in-progress: false
 
 jobs:
   debug:

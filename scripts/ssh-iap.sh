@@ -97,9 +97,11 @@ down() {
   fi
   if [ -f "${STATE_DIR}/id_ed25519.pub" ]; then
     log "Removing ephemeral key from OS Login..."
-    local fp
-    fp="$(ssh-keygen -lf "${STATE_DIR}/id_ed25519.pub" -E sha256 2>/dev/null | awk '{print $2}' | sed 's/^SHA256://')" || true
-    gcloud compute os-login ssh-keys remove --key="${fp}" --project="${PROJECT_ID}" 2>/dev/null || true
+    # --key accepts either a raw public key or its OS Login fingerprint (a hex
+    # SHA-256 digest) -- NOT ssh-keygen's base64 display fingerprint, which is
+    # a different format and would silently never match. Pass the public key
+    # file directly to avoid the format mismatch entirely.
+    gcloud compute os-login ssh-keys remove --key="${STATE_DIR}/id_ed25519.pub" --project="${PROJECT_ID}" || true
   fi
   rm -rf "${STATE_DIR}"
   log "Ephemeral SSH torn down."

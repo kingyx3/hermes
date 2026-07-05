@@ -7,6 +7,21 @@
   at instance level by Terraform; project-level `roles/compute.osAdminLogin`
   also works).
 - OS Login must be on (Terraform sets `enable-oslogin=TRUE` in VM metadata).
+- Terraform binds these to `var.deploy_sa_email`, which the workflow resolves
+  directly from `GCP_SA_KEY`'s `client_email` (not looked up dynamically in
+  Terraform, since `google_client_openid_userinfo` is known to silently return
+  an empty email with service-account-key auth on some provider versions). If
+  IAP/OS-Login access is missing for an unexpected principal, check the
+  `deploy_sa_email` value in the generated `terraform.auto.tfvars.json`.
+
+## My Deploy/Debug/Sync run for the VM is stuck "Waiting"
+
+- `deploy.yml`, `destroy.yml`, `debug.yml`, and `sync.yml` all share the
+  `hermes-infra` concurrency group and queue rather than run in parallel,
+  since they all touch the same VM/SSH session. This is by design — e.g. a
+  `debug.yml` restart can't land mid-way through a live `terraform apply`, and
+  the daily sync can't rsync a VM whose config Deploy is actively rewriting.
+  Wait for the earlier run to finish (or cancel it, if it's stuck).
 
 ## SSH connects but sudo/rsync fails during sync
 

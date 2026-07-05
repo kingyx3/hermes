@@ -324,7 +324,9 @@ on the agent. Inputs: `action` (`logs` default, `status`, `journal-boot`,
 It reads no application secrets itself (`GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`,
 etc. never pass through this workflow) and requires **Deploy** to have run at
 least once, since it relies on the IAP/OS-Login IAM bindings deploy
-self-grants.
+self-grants. It shares a concurrency group with Deploy/Destroy/Sync (they all
+touch the same VM), so it queues rather than races if one of those is
+already running.
 
 ## Daily & manual sync
 

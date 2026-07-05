@@ -22,7 +22,10 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: hermes-sync
+  # Shares deploy.yml/destroy.yml/debug.yml's group so the daily cron can
+  # never rsync a VM whose service/config Deploy is actively rewriting (or
+  # race a Destroy tearing the VM down mid-pull) -- it queues instead.
+  group: hermes-infra
   cancel-in-progress: false
 
 jobs:

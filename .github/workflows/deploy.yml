@@ -194,6 +194,13 @@ jobs:
         working-directory: terraform
         run: |
           set -euo pipefail
+          # deploy_sa_email is resolved here (not via Terraform's
+          # google_client_openid_userinfo data source) because that data
+          # source is known to silently return an empty email with
+          # service-account-key auth on several provider versions
+          # (hashicorp/terraform-provider-google#16431) -- see main.tf.
+          SA_EMAIL="$(jq -r '.client_email' "${GOOGLE_APPLICATION_CREDENTIALS}")"
+          [ -n "${SA_EMAIL}" ] && [ "${SA_EMAIL}" != "null" ] || { echo "Could not resolve deploy SA email"; exit 1; }
           cat > terraform.auto.tfvars.json <<JSON
           {
             "project_id": "${{ steps.cfg.outputs.project_id }}",
@@ -206,7 +213,8 @@ jobs:
             "hermes_user": "${{ steps.cfg.outputs.hermes_user }}",
             "hermes_home": "${{ steps.cfg.outputs.hermes_home }}",
             "hermes_config_dir": "${{ steps.cfg.outputs.hermes_config_dir }}",
-            "workspace_dir": "${{ steps.cfg.outputs.workspace_dir }}"
+            "workspace_dir": "${{ steps.cfg.outputs.workspace_dir }}",
+            "deploy_sa_email": "${SA_EMAIL}"
           }
           JSON
 
