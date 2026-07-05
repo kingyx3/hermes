@@ -5,7 +5,8 @@ name: Deploy Hermes Agent
 # Hermes Agent, configures Gemini (+ optional Telegram gateway and other runtime
 # config -- see the Render env file step and docs/security.md), installs the
 # systemd service, then strips the temporary external IPv4 unless Telegram
-# polling needs outbound internet egress.
+# polling needs outbound internet egress. A post-deploy smoke/debug check runs
+# automatically at the end of every successful deploy.
 #
 # Re-run this workflow any time you change a secret/variable it reads (e.g.
 # TELEGRAM_BOT_TOKEN, HERMES_EXTRA_ENV) -- it re-renders the env file on the
@@ -412,6 +413,44 @@ jobs:
             fi
             echo "OK: VM has no external IPv4 (Free-Tier steady state)."
           fi
+
+      - name: Establish post-deploy SSH over IAP
+        id: smoke_ssh
+        env:
+          VM_NAME: ${{ steps.cfg.outputs.vm_name }}
+          ZONE: ${{ steps.cfg.outputs.zone }}
+          PROJECT_ID: ${{ steps.cfg.outputs.project_id }}
+        run: |
+          set -euo pipefail
+          ENV_FILE="$(scripts/ssh-iap.sh up)"
+          echo "env_file=${ENV_FILE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run post-deploy smoke debug
+        env:
+          HERMES_USER: ${{ steps.cfg.outputs.hermes_user }}
+          HERMES_HOME: ${{ steps.cfg.outputs.hermes_home }}
+          HERMES_CONFIG_DIR: ${{ steps.cfg.outputs.hermes_config_dir }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1090
+          source "${{ steps.smoke_ssh.outputs.env_file }}"
+          SSH="ssh -i ${SSH_KEY} -p ${SSH_PORT} ${SSH_OPTS} ${SSH_USER}@localhost"
+
+          for i in $(seq 1 30); do
+            if ${SSH} true 2>/dev/null; then break; fi
+            [ "${i}" = "30" ] && { echo "VM SSH not ready for post-deploy smoke"; exit 1; }
+            sleep 5
+          done
+
+          ${SSH} "sudo HERMES_USER='${HERMES_USER}' HERMES_HOME='${HERMES_HOME}' HERMES_CONFIG_DIR='${HERMES_CONFIG_DIR}' LINES='500' bash /usr/local/bin/hermes-ops smoke"
+
+      - name: Tear down post-deploy SSH
+        if: always()
+        env:
+          VM_NAME: ${{ steps.cfg.outputs.vm_name }}
+          ZONE: ${{ steps.cfg.outputs.zone }}
+          PROJECT_ID: ${{ steps.cfg.outputs.project_id }}
+        run: scripts/ssh-iap.sh down || true
 
       - name: Clean up runner secrets
         if: always()
