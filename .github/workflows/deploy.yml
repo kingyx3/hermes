@@ -113,12 +113,28 @@ jobs:
           fi
 
           echo "Ensuring IAM roles for ${SA_EMAIL} on ${PROJECT_ID}"
+          # Every role the whole deploy needs, self-granted so the pipeline is
+          # self-contained (each is idempotent). Mapped to the operations that
+          # need it:
+          #   projectIamAdmin          - self-grant these bindings; preflight describe
+          #   serviceUsageAdmin        - gcloud services enable (the next step)
+          #   storage.admin            - create the TF state bucket + read/write state
+          #   compute.admin            - VPC/subnet/firewall/instance + instance IAM
+          #   iam.serviceAccountAdmin  - create the VM's dedicated service account
+          #   iam.serviceAccountUser   - actAs that SA to attach it to the VM
+          #   iap.admin                - IAP tunnel instance IAM + open the SSH tunnel
+          #   compute.osAdminLogin     - SSH into the VM as an OS Login admin (project
+          #                              wide, so login does not depend on Terraform's
+          #                              per-instance binding having propagated yet)
           for ROLE in \
+            roles/resourcemanager.projectIamAdmin \
             roles/serviceusage.serviceUsageAdmin \
+            roles/storage.admin \
             roles/compute.admin \
             roles/iam.serviceAccountAdmin \
             roles/iam.serviceAccountUser \
-            roles/iap.admin; do
+            roles/iap.admin \
+            roles/compute.osAdminLogin; do
             gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
               --member="serviceAccount:${SA_EMAIL}" \
               --role="${ROLE}" \
