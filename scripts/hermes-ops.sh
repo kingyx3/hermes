@@ -13,6 +13,8 @@ set -euo pipefail
 HERMES_USER="${HERMES_USER:-hermes}"
 HERMES_HOME="${HERMES_HOME:-/home/hermes}"
 HERMES_CONFIG_DIR="${HERMES_CONFIG_DIR:-${HERMES_HOME}/.hermes}"
+HERMES_STATE_DIR="${HERMES_CONFIG_DIR}/state"
+HERMES_GATEWAY_LOCK_DIR="${HERMES_STATE_DIR}/hermes/gateway-locks"
 HERMES_BIN="${HERMES_HOME}/.local/bin/hermes"
 SERVICE="hermes-agent.service"
 ENV_FILE="/etc/hermes-agent/hermes.env"
@@ -22,6 +24,8 @@ run_hermes() {
   sudo -u "${HERMES_USER}" \
     HERMES_HOME="${HERMES_CONFIG_DIR}" \
     HOME="${HERMES_HOME}" \
+    XDG_STATE_HOME="${HERMES_STATE_DIR}" \
+    HERMES_GATEWAY_LOCK_DIR="${HERMES_GATEWAY_LOCK_DIR}" \
     bash -c 'set -a; [ -r /etc/hermes-agent/hermes.env ] && . /etc/hermes-agent/hermes.env; set +a; exec "$@"' _ "${HERMES_BIN}" "$@"
 }
 
@@ -32,6 +36,23 @@ env_check() {
     echo "ERROR: ${ENV_FILE} not found or unreadable." >&2
     exit 1
   fi
+}
+
+lock_dir_check() {
+  echo "HERMES_GATEWAY_LOCK_DIR=${HERMES_GATEWAY_LOCK_DIR}"
+  sudo install -d -o "${HERMES_USER}" -g "${HERMES_USER}" -m 0700 "${HERMES_GATEWAY_LOCK_DIR}"
+  sudo -u "${HERMES_USER}" \
+    HERMES_HOME="${HERMES_CONFIG_DIR}" \
+    HOME="${HERMES_HOME}" \
+    XDG_STATE_HOME="${HERMES_STATE_DIR}" \
+    HERMES_GATEWAY_LOCK_DIR="${HERMES_GATEWAY_LOCK_DIR}" \
+    bash -c 'tmp="${HERMES_GATEWAY_LOCK_DIR}/.write-test.$$"; echo ok > "$tmp"; rm -f "$tmp"'
+  echo "OK: Hermes gateway lock directory is writable."
+}
+
+recent_telegram_errors() {
+  sudo journalctl -u "${SERVICE}" --no-pager --since "-10 minutes" \
+    | grep -E 'Failed to connect to Telegram|telegram failed to connect|Gateway started with no connected platforms|Read-only file system' || true
 }
 
 telegram_check() {
@@ -72,8 +93,19 @@ smoke() {
   echo "== Runtime env keys =="
   env_check
   echo
+  echo "== Gateway lock dir =="
+  lock_dir_check
+  echo
   echo "== Telegram API =="
   telegram_check
+  echo
+  echo "== Recent Telegram startup errors =="
+  recent_errors="$(recent_telegram_errors)"
+  if [ -n "${recent_errors}" ]; then
+    printf '%s\n' "${recent_errors}"
+    exit 1
+  fi
+  echo "OK: no recent Telegram gateway startup errors."
   echo
   echo "== Hermes doctor =="
   run_hermes doctor || echo "hermes doctor reported warnings; service and Telegram checks passed."
@@ -101,6 +133,9 @@ summary() {
   echo "== Runtime env keys (values redacted) =="
   env_check || true
   echo
+  echo "== Gateway lock dir =="
+  lock_dir_check || true
+  echo
   echo "== Recent logs =="
   sudo journalctl -u "${SERVICE}" --no-pager -n "${LINES:-80}" || true
 }
@@ -112,12 +147,7 @@ case "${cmd}" in
   restart) sudo systemctl restart "${SERVICE}" ;;
   status)  sudo systemctl --no-pager --full status "${SERVICE}" ;;
   logs)    sudo journalctl -u "${SERVICE}" --no-pager -n "${LINES:-200}" ;;
-  # Full journal since the last boot -- useful for diagnosing crash loops or
-  # startup failures that scrolled past the tail-limited `logs` action.
   journal-boot) sudo journalctl -u "${SERVICE}" --no-pager -b ;;
-  # Lists which env var KEYS are set in the runtime env file, values redacted.
-  # Use to confirm e.g. TELEGRAM_BOT_TOKEN made it to the VM without ever
-  # printing secret values.
   env-check) env_check ;;
   summary) summary ;;
   disk) df -h / "${HERMES_HOME}" "${HERMES_CONFIG_DIR}" 2>/dev/null || df -h / ;;

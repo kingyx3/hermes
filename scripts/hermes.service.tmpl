@@ -16,6 +16,7 @@ WorkingDirectory=${WORKSPACE_DIR}
 EnvironmentFile=/etc/hermes-agent/hermes.env
 Environment=HERMES_HOME=${HERMES_CONFIG_DIR}
 Environment=XDG_STATE_HOME=${HERMES_CONFIG_DIR}/state
+Environment=HERMES_GATEWAY_LOCK_DIR=${HERMES_CONFIG_DIR}/state/hermes/gateway-locks
 Environment=PATH=${HERMES_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 # Unattended background entrypoint. `hermes gateway` (no subcommand) runs the

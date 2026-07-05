@@ -16,6 +16,7 @@ HERMES_USER="${HERMES_USER:-hermes}"
 HERMES_HOME="${HERMES_HOME:-/home/hermes}"
 HERMES_CONFIG_DIR="${HERMES_CONFIG_DIR:-${HERMES_HOME}/.hermes}"
 HERMES_STATE_DIR="${HERMES_CONFIG_DIR}/state"
+HERMES_GATEWAY_LOCK_DIR="${HERMES_STATE_DIR}/hermes/gateway-locks"
 HERMES_BIN="${HERMES_HOME}/.local/bin/hermes"
 SYSTEM_ENV_FILE="/etc/hermes-agent/hermes.env"
 HERMES_DOTENV="${HERMES_CONFIG_DIR}/.env"
@@ -42,6 +43,7 @@ sudo chmod 0600 "${SYSTEM_ENV_FILE}"
 log "Syncing rendered env into ${HERMES_DOTENV}..."
 sudo install -d -o "${HERMES_USER}" -g "${HERMES_USER}" -m 0700 "${HERMES_CONFIG_DIR}"
 sudo install -d -o "${HERMES_USER}" -g "${HERMES_USER}" -m 0700 "${HERMES_STATE_DIR}"
+sudo install -d -o "${HERMES_USER}" -g "${HERMES_USER}" -m 0700 "${HERMES_GATEWAY_LOCK_DIR}"
 sudo install -o "${HERMES_USER}" -g "${HERMES_USER}" -m 0600 "${SYSTEM_ENV_FILE}" "${HERMES_DOTENV}"
 
 # Upstream doctor still has a generic raw-text provider marker check that does
@@ -65,6 +67,7 @@ if sudo -u "${HERMES_USER}" test -x "${HERMES_BIN}"; then
     HERMES_HOME="${HERMES_CONFIG_DIR}" \
     HOME="${HERMES_HOME}" \
     XDG_STATE_HOME="${HERMES_STATE_DIR}" \
+    HERMES_GATEWAY_LOCK_DIR="${HERMES_GATEWAY_LOCK_DIR}" \
     bash -c 'set -a; [ -r "$1" ] && . "$1"; set +a; exec "$2" doctor --fix' _ "${HERMES_DOTENV}" "${HERMES_BIN}" \
     || log "hermes doctor --fix reported issues; continuing so service status is visible."
 fi
