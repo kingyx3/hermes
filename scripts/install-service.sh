@@ -12,6 +12,12 @@ set -euo pipefail
 
 RENDERED_UNIT="${RENDERED_UNIT:-/tmp/hermes.service}"
 UNIT_DEST="/etc/systemd/system/hermes-agent.service"
+HERMES_USER="${HERMES_USER:-hermes}"
+HERMES_HOME="${HERMES_HOME:-/home/hermes}"
+HERMES_CONFIG_DIR="${HERMES_CONFIG_DIR:-${HERMES_HOME}/.hermes}"
+HERMES_BIN="${HERMES_HOME}/.local/bin/hermes"
+SYSTEM_ENV_FILE="/etc/hermes-agent/hermes.env"
+HERMES_DOTENV="${HERMES_CONFIG_DIR}/.env"
 
 log() { printf '[service] %s\n' "$*"; }
 
@@ -21,12 +27,32 @@ if [ ! -f "${RENDERED_UNIT}" ]; then
 fi
 
 # Verify the env file exists and is locked down before starting the service.
-if [ ! -f /etc/hermes-agent/hermes.env ]; then
-  echo "[service] ERROR: /etc/hermes-agent/hermes.env missing; run the env step first." >&2
+if [ ! -f "${SYSTEM_ENV_FILE}" ]; then
+  echo "[service] ERROR: ${SYSTEM_ENV_FILE} missing; run the env step first." >&2
   exit 1
 fi
-sudo chown root:root /etc/hermes-agent/hermes.env
-sudo chmod 0600 /etc/hermes-agent/hermes.env
+sudo chown root:root "${SYSTEM_ENV_FILE}"
+sudo chmod 0600 "${SYSTEM_ENV_FILE}"
+
+# Hermes itself also checks $HERMES_HOME/.env for provider credentials during
+# doctor/gateway startup. Keep the root-owned systemd EnvironmentFile as the
+# source of truth, then mirror the rendered values into the hermes user's
+# private profile .env so non-interactive deploys behave like `hermes setup`.
+log "Syncing rendered env into ${HERMES_DOTENV}..."
+sudo install -d -o "${HERMES_USER}" -g "${HERMES_USER}" -m 0700 "${HERMES_CONFIG_DIR}"
+sudo install -o "${HERMES_USER}" -g "${HERMES_USER}" -m 0600 "${SYSTEM_ENV_FILE}" "${HERMES_DOTENV}"
+
+# Apply Hermes config migrations once credentials are visible in the profile.
+# Non-fatal: a doctor warning should not prevent systemd from restarting, and
+# the follow-up health check/debug action will still expose remaining issues.
+if sudo -u "${HERMES_USER}" test -x "${HERMES_BIN}"; then
+  log "Running hermes doctor --fix..."
+  sudo -u "${HERMES_USER}" \
+    HERMES_HOME="${HERMES_CONFIG_DIR}" \
+    HOME="${HERMES_HOME}" \
+    bash -c 'set -a; [ -r "$1" ] && . "$1"; set +a; exec "$2" doctor --fix' _ "${HERMES_DOTENV}" "${HERMES_BIN}" \
+    || log "hermes doctor --fix reported issues; continuing so service status is visible."
+fi
 
 log "Installing systemd unit..."
 sudo install -m 0644 "${RENDERED_UNIT}" "${UNIT_DEST}"
