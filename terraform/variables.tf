@@ -99,6 +99,16 @@ variable "cicd_members" {
   default     = []
 }
 
+variable "deploy_sa_email" {
+  description = "Email of the CI/deploy service account (the one authenticating this apply), granted IAP tunnel + OS Login access automatically. Resolved by the calling workflow from GCP_SA_KEY's client_email field, not looked up in-provider (see main.tf for why)."
+  type        = string
+
+  validation {
+    condition     = length(trimspace(var.deploy_sa_email)) > 0
+    error_message = "deploy_sa_email must not be empty -- pass the CI service account's client_email (e.g. via jq on GOOGLE_APPLICATION_CREDENTIALS in the calling workflow)."
+  }
+}
+
 # ---------------------------------------------------------------------------
 # Naming / Hermes layout
 # ---------------------------------------------------------------------------

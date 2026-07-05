@@ -132,15 +132,17 @@ resource "google_compute_instance" "hermes" {
 # tunnels to the VM and log in via OS Login as a normal (non-admin) user.
 # ---------------------------------------------------------------------------
 locals {
-  # The CI principal is inferred at apply time from the active credentials via
-  # the google_client_openid_userinfo data source below.
+  # The CI principal is passed in explicitly (var.deploy_sa_email, resolved by
+  # the calling workflow from the same GCP_SA_KEY JSON used to authenticate).
+  # NOT derived from data.google_client_openid_userinfo: that data source is
+  # known to silently return an empty email with service-account-key auth on
+  # several terraform-provider-google versions (hashicorp/terraform-provider-google#16431),
+  # which would produce an invalid "serviceAccount:" IAM member and fail apply.
   iap_members = toset(concat(
-    ["serviceAccount:${data.google_client_openid_userinfo.me.email}"],
+    ["serviceAccount:${var.deploy_sa_email}"],
     var.cicd_members,
   ))
 }
-
-data "google_client_openid_userinfo" "me" {}
 
 resource "google_iap_tunnel_instance_iam_member" "ssh" {
   for_each = local.iap_members

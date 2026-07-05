@@ -8,7 +8,11 @@ model provider, with the VM's `.hermes` and `workspace` synced back to this repo
 
 The VM is a thin runtime host; **all heavy work (Terraform, rendering, SSH,
 rsync, git) runs on GitHub Actions runners**. Only **two GitHub secrets** are
-required and **no repository variables** are needed.
+required and **no repository variables** are needed. Everything else —
+including an optional **Telegram gateway** so you can talk to the agent
+directly — is opt-in via additional secrets/variables; see
+[Telegram (optional)](#telegram-optional) and
+[Controlling Hermes via env vars](#controlling-hermes-via-env-vars).
 
 ---
 
@@ -24,7 +28,10 @@ required and **no repository variables** are needed.
 - [Deploying](#deploying)
 - [What runs where](#what-runs-where-github-actions-vs-vm)
 - [Hermes install & Gemini config](#hermes-install--gemini-configuration)
+- [Telegram (optional)](#telegram-optional)
+- [Controlling Hermes via env vars](#controlling-hermes-via-env-vars)
 - [Operating the service](#operating-the-service)
+- [Debugging](#debugging)
 - [Daily & manual sync](#daily--manual-sync)
 - [Terraform & state](#terraform--state)
 - [GCP Free Tier & cost warnings](#gcp-free-tier--cost-warnings)
@@ -44,8 +51,8 @@ required and **no repository variables** are needed.
   via **Private Google Access** (no Cloud NAT). A temporary ephemeral external IP
   is attached only during bootstrap and then removed.
 - SSH via **IAP TCP forwarding** with **ephemeral, per-run OS Login keys**.
-- Hermes runs as `hermes-agent.service` (`hermes gateway run`, unattended,
-  localhost-only).
+- Hermes runs as `hermes-agent.service` (`hermes gateway`, unattended,
+  localhost-only, with an optional Telegram gateway — see below).
 - Sync pulls files with `rsync` on the runner and commits with `GITHUB_TOKEN`.
 
 See [`docs/architecture.md`](docs/architecture.md) for a diagram and details.
@@ -58,7 +65,7 @@ terraform/    GCP infra (VM, VPC/subnet w/ PGA, IAP firewall, SA, IAM), vars,
 scripts/      VM-side helpers (bootstrap, configure, service, ops) +
               runner-side helpers (render env, ephemeral SSH/IAP, sync) +
               sync-excludes.txt + systemd/env templates
-.github/workflows/  deploy.yml, sync.yml, pr-validate.yml, destroy.yml
+.github/workflows/  deploy.yml, debug.yml, sync.yml, pr-validate.yml, destroy.yml
 ansible/      intentionally unused (see ansible/README.md)
 docs/         architecture, security, troubleshooting
 ```
@@ -82,6 +89,17 @@ Only these two (Settings → Secrets and variables → Actions → **Secrets**):
 
 **No GitHub repository variables are required.**
 
+### Optional secrets (Telegram + generic extras)
+
+Add these only if you want them; leaving them unset keeps the corresponding
+feature disabled. See [Telegram (optional)](#telegram-optional) and
+[Controlling Hermes via env vars](#controlling-hermes-via-env-vars).
+
+| Secret | Purpose |
+|--------|---------|
+| `TELEGRAM_BOT_TOKEN` | Telegram bot API token from [@BotFather](https://t.me/BotFather). Telegram **auto-activates** in Hermes purely from this being set — no other config needed. |
+| `HERMES_EXTRA_SECRETS` | Multi-line `KEY=VALUE` block of any other secret runtime env vars (e.g. another provider's API key), appended verbatim to the VM's env file. Never printed in logs. |
+
 ## Optional repository variable overrides
 
 If present (Settings → Secrets and variables → Actions → **Variables**) they
@@ -97,6 +115,12 @@ override defaults; workflows work fine without them:
 | `GCP_DISK_SIZE_GB` | `30` |
 | `HERMES_USER` | `hermes` |
 | `HERMES_HOME` | `/home/hermes` |
+| `TELEGRAM_ALLOWED_USERS` | *(unset — see security note below)* |
+| `TELEGRAM_GROUP_ALLOWED_USERS` | *(unset)* |
+| `TELEGRAM_GROUP_ALLOWED_CHATS` | *(unset)* |
+| `TELEGRAM_HOME_CHANNEL` | *(unset)* |
+| `TELEGRAM_REACTIONS` | *(unset)* |
+| `HERMES_EXTRA_ENV` | *(unset)* — multi-line `KEY=VALUE` block of any other non-secret runtime env vars |
 
 `hermes_config_dir` (`$HERMES_HOME/.hermes`) and `workspace_dir`
 (`$HERMES_HOME/workspace`) are derived automatically.
@@ -178,7 +202,7 @@ The VM then reaches the Gemini API via **Private Google Access**.
 rendering, copying rendered files to the VM, rsync pull, sync diff/commit/push,
 SSH/IP cleanup, external-IP verification, shellcheck.
 
-**The VM (only):** the Hermes runtime (`hermes gateway run`), state under
+**The VM (only):** the Hermes runtime (`hermes gateway`), state under
 `.hermes`, files under `workspace`, `/etc/hermes-agent/hermes.env`, minimal OS
 packages, size-capped journald logs, and lightweight `hermes-ops` commands.
 
@@ -217,23 +241,92 @@ loads it via `EnvironmentFile=`.
 ### The systemd service
 
 `hermes-agent.service` runs as the `hermes` user, loads the env file, sets
-`HERMES_HOME`, works in `workspace`, runs `hermes gateway run` (unattended,
-no public listener), restarts on failure with conservative limits, and logs to
-journald (capped at 200 MB / 1 week).
+`HERMES_HOME`, works in `workspace`, runs `hermes gateway` (unattended,
+no public listener; picks up Telegram and any other configured messaging
+platform purely from the env file), restarts on failure with conservative
+limits, and logs to journald (capped at 200 MB / 1 week).
+
+## Telegram (optional)
+
+Link Hermes to Telegram so you can message it directly (it also still runs
+fine standalone with no messaging platform configured):
+
+1. Create a bot via [@BotFather](https://t.me/BotFather) (`/newbot`) to get a
+   token like `123456789:ABCdefGHIjklMNOpqrSTUvwxYZ`.
+2. Get your numeric Telegram user ID from [@userinfobot](https://t.me/userinfobot)
+   (**not** your `@username`).
+3. Add the GitHub secret `TELEGRAM_BOT_TOKEN` = the bot token.
+4. Add the GitHub repo variable `TELEGRAM_ALLOWED_USERS` = your numeric user ID
+   (comma-separate for multiple people). **Strongly recommended** — without an
+   allowlist, unknown DMs fall through to Hermes's pairing flow instead of
+   being fully blocked.
+5. Re-run **Deploy Hermes Agent**. Telegram auto-activates purely from
+   `TELEGRAM_BOT_TOKEN` being present in the env file — no config.yaml change
+   is needed. The bot should come online within seconds of the service
+   restarting.
+
+Optional variables for group chats and more: `TELEGRAM_GROUP_ALLOWED_USERS`,
+`TELEGRAM_GROUP_ALLOWED_CHATS`, `TELEGRAM_HOME_CHANNEL`, `TELEGRAM_REACTIONS`
+(`true`/`false`). By default the bot can't see regular group messages
+(Telegram privacy mode) — disable it via BotFather (`/mybots` → Bot Settings →
+Group Privacy → Turn off) and re-add the bot to the group, or promote it to
+group admin.
+
+## Controlling Hermes via env vars
+
+Every runtime setting Hermes reads from the environment can be pushed from
+GitHub with no workflow code change:
+
+- **Named settings** (Telegram, model, etc.) are explicit GitHub
+  secrets/variables, listed above — edit one and re-run **Deploy**.
+- **Anything else** — another model provider's API key, `TERMINAL_BACKEND`, or
+  any future Hermes env var — goes in the generic passthrough:
+  - `HERMES_EXTRA_ENV` (repo **variable**, non-secret): one `KEY=VALUE` pair
+    per line.
+  - `HERMES_EXTRA_SECRETS` (GitHub **secret**): same format, for values that
+    must never appear in a log.
+
+Both are appended verbatim to `/etc/hermes-agent/hermes.env` by
+`scripts/render-env.sh` and take effect on the next **Deploy** run (which
+re-renders the env file and restarts the service). Use `env-check` (see
+[Debugging](#debugging)) to confirm a key landed on the VM without ever
+printing its value.
 
 ## Operating the service
 
 On the VM (or over IAP SSH), via the installed `hermes-ops` helper:
 
 ```bash
-hermes-ops start | stop | restart | status | logs | doctor | update
+hermes-ops start | stop | restart | status | logs | journal-boot | env-check | doctor | update
 ```
 
-`update` runs `hermes update` then restarts the service. To SSH in:
+- `logs` tails the last `LINES` (default 200) journal lines; `journal-boot`
+  dumps the full journal since the last boot (crash-loop debugging).
+- `env-check` lists which env var **keys** are set in the VM's env file, with
+  values redacted — confirms e.g. `TELEGRAM_BOT_TOKEN` made it across without
+  ever printing it.
+- `update` runs `hermes update` then restarts the service.
+
+To SSH in directly:
 
 ```bash
 gcloud compute ssh hermes-agent --zone us-central1-a --tunnel-through-iap
 ```
+
+## Debugging
+
+The **Debug Hermes Agent** workflow (Actions → Debug Hermes Agent → Run
+workflow) runs any of the `hermes-ops` actions above over an ephemeral IAP SSH
+session and prints the result in the run's log — no manual SSH needed to check
+on the agent. Inputs: `action` (`logs` default, `status`, `journal-boot`,
+`env-check`, `doctor`, `restart`) and `lines` (for `logs`).
+
+It reads no application secrets itself (`GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`,
+etc. never pass through this workflow) and requires **Deploy** to have run at
+least once, since it relies on the IAP/OS-Login IAM bindings deploy
+self-grants. It shares a concurrency group with Deploy/Destroy/Sync (they all
+touch the same VM), so it queues rather than races if one of those is
+already running.
 
 ## Daily & manual sync
 
@@ -330,19 +423,24 @@ gcloud storage buckets list
 ## Security
 
 Highlights (full notes in [`docs/security.md`](docs/security.md)): only two
-secrets; no long-lived VM SSH key; no PAT/deploy key; ephemeral IAP SSH;
-`GITHUB_TOKEN` for commits; VM secret file is root-owned 0600; Hermes and SSH
-are never publicly exposed; `GEMINI_API_KEY`/`GCP_SA_KEY` never enter git,
-Terraform state, or logs; secret-bearing files are excluded from sync.
+secrets required (Telegram/extras are opt-in); no long-lived VM SSH key; no
+PAT/deploy key; ephemeral IAP SSH; `GITHUB_TOKEN` for commits; VM secret file
+is root-owned 0600; Hermes and SSH are never publicly exposed; all secrets
+(`GEMINI_API_KEY`, `GCP_SA_KEY`, `TELEGRAM_BOT_TOKEN`, `HERMES_EXTRA_SECRETS`)
+never enter git, Terraform state, or logs; secret-bearing files are excluded
+from sync; **set `TELEGRAM_ALLOWED_USERS`** if you enable the Telegram
+gateway, or unknown users fall through to Hermes's pairing flow.
 
 ## Assumptions, limitations & troubleshooting
 
 - **e2-micro is small (1 GB RAM).** The install can be memory-tight; use the
   `enable_swap` deploy input if needed. No local LLM inference — Gemini serves
   all inference.
-- **Gateway mode.** `hermes gateway run` is used as the unattended entrypoint; it
-  serves locally and works without any messaging platform. To connect a chat
-  platform later, add its token to the env file and re-deploy.
+- **Gateway mode.** `hermes gateway` is used as the unattended entrypoint; it
+  serves locally and works without any messaging platform configured. See
+  [Telegram (optional)](#telegram-optional) to connect one, or
+  [Controlling Hermes via env vars](#controlling-hermes-via-env-vars) for any
+  other runtime config — add the secret/variable and re-run **Deploy**.
 - **Free Tier is not free-forever or guaranteed** — verify current pricing and
   set a budget alert.
 - Common issues and fixes: [`docs/troubleshooting.md`](docs/troubleshooting.md).

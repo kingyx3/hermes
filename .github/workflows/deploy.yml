@@ -1,8 +1,14 @@
 name: Deploy Hermes Agent
 
 # Manual only. Provisions/updates the Free-Tier VM, installs the official
-# Nous Research Hermes Agent, configures Gemini, installs the systemd service,
-# then strips the temporary external IP and verifies the steady state.
+# Nous Research Hermes Agent, configures Gemini (+ optional Telegram gateway
+# and other runtime config -- see the Render env file step and
+# docs/security.md), installs the systemd service, then strips the temporary
+# external IP and verifies the steady state.
+#
+# Re-run this workflow any time you change a secret/variable it reads (e.g.
+# TELEGRAM_BOT_TOKEN, HERMES_EXTRA_ENV) -- it re-renders the env file on the
+# VM and restarts the service, with no other manual step required.
 on:
   workflow_dispatch:
     inputs:
@@ -30,7 +36,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Mask secrets in logs
-        run: echo "::add-mask::${{ secrets.GEMINI_API_KEY }}"
+        run: |
+          echo "::add-mask::${{ secrets.GEMINI_API_KEY }}"
+          echo "::add-mask::${{ secrets.TELEGRAM_BOT_TOKEN }}"
+          # HERMES_EXTRA_SECRETS is multi-line/arbitrary; GitHub Actions already
+          # auto-masks any verbatim occurrence of a secrets.* value in logs, and
+          # render-env.sh never echoes it, so no extra per-line masking is added.
 
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
@@ -183,6 +194,13 @@ jobs:
         working-directory: terraform
         run: |
           set -euo pipefail
+          # deploy_sa_email is resolved here (not via Terraform's
+          # google_client_openid_userinfo data source) because that data
+          # source is known to silently return an empty email with
+          # service-account-key auth on several provider versions
+          # (hashicorp/terraform-provider-google#16431) -- see main.tf.
+          SA_EMAIL="$(jq -r '.client_email' "${GOOGLE_APPLICATION_CREDENTIALS}")"
+          [ -n "${SA_EMAIL}" ] && [ "${SA_EMAIL}" != "null" ] || { echo "Could not resolve deploy SA email"; exit 1; }
           cat > terraform.auto.tfvars.json <<JSON
           {
             "project_id": "${{ steps.cfg.outputs.project_id }}",
@@ -195,7 +213,8 @@ jobs:
             "hermes_user": "${{ steps.cfg.outputs.hermes_user }}",
             "hermes_home": "${{ steps.cfg.outputs.hermes_home }}",
             "hermes_config_dir": "${{ steps.cfg.outputs.hermes_config_dir }}",
-            "workspace_dir": "${{ steps.cfg.outputs.workspace_dir }}"
+            "workspace_dir": "${{ steps.cfg.outputs.workspace_dir }}",
+            "deploy_sa_email": "${SA_EMAIL}"
           }
           JSON
 
@@ -235,6 +254,19 @@ jobs:
           HERMES_HOME: ${{ steps.cfg.outputs.hermes_home }}
           HERMES_CONFIG_DIR: ${{ steps.cfg.outputs.hermes_config_dir }}
           WORKSPACE_DIR: ${{ steps.cfg.outputs.workspace_dir }}
+          # Telegram gateway (all optional; blank = Telegram stays disabled).
+          # See docs/security.md for the TELEGRAM_ALLOWED_USERS recommendation.
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_ALLOWED_USERS: ${{ vars.TELEGRAM_ALLOWED_USERS }}
+          TELEGRAM_GROUP_ALLOWED_USERS: ${{ vars.TELEGRAM_GROUP_ALLOWED_USERS }}
+          TELEGRAM_GROUP_ALLOWED_CHATS: ${{ vars.TELEGRAM_GROUP_ALLOWED_CHATS }}
+          TELEGRAM_HOME_CHANNEL: ${{ vars.TELEGRAM_HOME_CHANNEL }}
+          TELEGRAM_REACTIONS: ${{ vars.TELEGRAM_REACTIONS }}
+          # Generic escape hatch so any other Hermes runtime config (model
+          # providers, terminal backend, etc.) can be pushed via GHA without a
+          # workflow code change -- edit the repo variable/secret and re-run.
+          HERMES_EXTRA_ENV: ${{ vars.HERMES_EXTRA_ENV }}
+          HERMES_EXTRA_SECRETS: ${{ secrets.HERMES_EXTRA_SECRETS }}
         run: |
           set -euo pipefail
           chmod +x scripts/*.sh

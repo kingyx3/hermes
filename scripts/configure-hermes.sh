@@ -32,31 +32,42 @@ run_hermes() {
 }
 
 log "Selecting Gemini provider and model '${HERMES_MODEL}'..."
-# Primary path: the documented non-interactive CLI. Tolerant of key-name
-# differences across Hermes versions (never abort the deploy on one of these).
+# Primary path: the documented non-interactive CLI, all as dotted keys under
+# the same `model:` block (per the official config.yaml schema: `default`,
+# `provider`, `base_url`). Using a BARE `model` key here (no dot) would
+# overwrite the whole `model:` value with a scalar string, wiping out
+# `provider`/`base_url` set just above — always use `model.default`.
+# Tolerant of key-name differences across Hermes versions (never abort the
+# deploy on one of these).
 run_hermes config set model.provider gemini || true
 run_hermes config set model.base_url "${GEMINI_BASE_URL}" || true
-run_hermes config set model "${HERMES_MODEL}" || true
+run_hermes config set model.default "${HERMES_MODEL}" || true
 
 # Verify the CLI actually recorded the gemini provider.
 CONFIG_FILE="${HERMES_CONFIG_DIR}/config.yaml"
-if sudo -u "${HERMES_USER}" grep -q 'provider: *gemini' "${CONFIG_FILE}" 2>/dev/null; then
+if sudo -u "${HERMES_USER}" grep -Eq '^model:[[:space:]]*$' "${CONFIG_FILE}" 2>/dev/null \
+   && sudo -u "${HERMES_USER}" grep -q 'provider: *gemini' "${CONFIG_FILE}" 2>/dev/null; then
   log "Gemini provider recorded in config.yaml."
-elif ! sudo -u "${HERMES_USER}" grep -q '^model:' "${CONFIG_FILE}" 2>/dev/null; then
-  # No model block yet — safe to append the documented one (non-secret).
-  log "No model block found; writing one directly."
+elif sudo -u "${HERMES_USER}" grep -Eq '^model:[[:space:]]*$' "${CONFIG_FILE}" 2>/dev/null; then
+  # model: is a real block (nested) but doesn't name gemini: do NOT touch it
+  # (that could create a duplicate key / invalid YAML). Surface it for manual
+  # review rather than silently corrupting a config someone else set up.
+  log "WARNING: config.yaml has a model block that is not 'gemini'. Review it:"
+  log "  sudo -u ${HERMES_USER} sed -n '/^model:/,/^[^[:space:]]/p' ${CONFIG_FILE}"
+else
+  # No model key at all, OR model: is a bad flat scalar (e.g. left over from
+  # an older version of this script that used a bare, non-dotted `config set
+  # model ...`, clobbering the block into a plain string). Safe to repair:
+  # drop any single flat `model: <value>` line, then write the documented
+  # block fresh.
+  log "No usable model block found; writing the documented one directly."
+  sudo -u "${HERMES_USER}" sed -i '/^model:[[:space:]]*[^[:space:]]/d' "${CONFIG_FILE}" 2>/dev/null || true
   sudo -u "${HERMES_USER}" tee -a "${CONFIG_FILE}" >/dev/null <<YAML
 model:
   default: ${HERMES_MODEL}
   provider: gemini
   base_url: ${GEMINI_BASE_URL}
 YAML
-else
-  # A model block exists but does not name gemini: do NOT append (that would
-  # create a duplicate key and invalid YAML). Surface it for manual review
-  # rather than silently corrupting the config.
-  log "WARNING: config.yaml has a model block that is not 'gemini'. Review it:"
-  log "  sudo -u ${HERMES_USER} sed -n '/^model:/,/^[^[:space:]]/p' ${CONFIG_FILE}"
 fi
 
 log "Hermes configuration step complete."
