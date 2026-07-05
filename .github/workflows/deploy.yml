@@ -88,6 +88,13 @@ jobs:
           # (setIamPolicy) only. Self-grant the operational roles the rest of the
           # deploy needs so the pipeline is self-contained. add-iam-policy-binding
           # is idempotent, so re-runs are no-ops once the bindings exist.
+          #
+          # PREREQUISITE (one-time, by a project Owner): the Cloud Resource Manager
+          # API must be enabled, since projects get/setIamPolicy is served by it.
+          # The SA cannot enable it itself (that needs serviceUsageAdmin, which it
+          # can only obtain via this very step) -- a circular bootstrap. Run once:
+          #   gcloud services enable cloudresourcemanager.googleapis.com \
+          #     --project=<PROJECT_ID>
           PROJECT_ID="${{ steps.cfg.outputs.project_id }}"
           SA_EMAIL="$(jq -r '.client_email' "${GOOGLE_APPLICATION_CREDENTIALS}")"
           [ -n "${SA_EMAIL}" ] && [ "${SA_EMAIL}" != "null" ] || { echo "Could not resolve deploy SA email"; exit 1; }
@@ -117,6 +124,8 @@ jobs:
           # propagate, so retry on the transient AUTH_PERMISSION_DENIED.
           for attempt in $(seq 1 8); do
             if gcloud services enable \
+              cloudresourcemanager.googleapis.com \
+              serviceusage.googleapis.com \
               compute.googleapis.com \
               iam.googleapis.com \
               iap.googleapis.com \
