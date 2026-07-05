@@ -9,8 +9,8 @@ name: Deploy Hermes Agent
 # automatically at the end of every successful deploy.
 #
 # Re-run this workflow any time you change a secret/variable it reads (e.g.
-# TELEGRAM_BOT_TOKEN, HERMES_EXTRA_ENV) -- it re-renders the env file on the
-# VM and restarts the service, with no other manual step required.
+# TELEGRAM_BOT_TOKEN, HERMES_MODEL, HERMES_EXTRA_ENV) -- it re-renders the env
+# file on the VM and restarts the service, with no other manual step required.
 on:
   push:
     branches:
@@ -22,7 +22,7 @@ on:
         type: boolean
         default: false
       hermes_model:
-        description: "Gemini model id (blank = gemini-flash-latest)"
+        description: "Gemini model override (blank = HERMES_MODEL var, else script default)"
         type: string
         default: ""
 
@@ -337,6 +337,8 @@ jobs:
           HERMES_CONFIG_DIR: ${{ steps.cfg.outputs.hermes_config_dir }}
           WORKSPACE_DIR: ${{ steps.cfg.outputs.workspace_dir }}
           ENABLE_SWAP: ${{ github.event_name == 'workflow_dispatch' && inputs.enable_swap && '1' || '0' }}
+          # Model selection priority: manual workflow input > HERMES_MODEL repo
+          # variable > configure-hermes.sh default.
           HERMES_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.hermes_model || vars.HERMES_MODEL || '' }}
         run: |
           set -euo pipefail
