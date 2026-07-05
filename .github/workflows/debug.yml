@@ -2,10 +2,8 @@ name: Debug Hermes Agent
 
 # Manual only. Opens an ephemeral SSH-over-IAP session to the VM, runs one
 # safe operational command via the installed `hermes-ops` helper, prints the
-# result in this run's log, then tears the session down. No application secrets
-# are read by this workflow -- it never touches GEMINI_API_KEY,
-# TELEGRAM_BOT_TOKEN, etc.; it only inspects/controls the already-running
-# service on the VM.
+# result in this run's log, then tears the session down. Secret values are never
+# printed; smoke checks only report redacted status and Telegram bot identity.
 #
 # Requires the deploy service account's project-level IAM bindings (IAP
 # tunnel access + OS Login admin), which the Deploy workflow self-grants on
@@ -25,6 +23,8 @@ on:
           - disk
           - memory
           - doctor
+          - smoke
+          - telegram-check
           - restart
           - start
           - stop
@@ -115,7 +115,7 @@ jobs:
             exit 1
           fi
           case "${ACTION}" in
-            summary|logs|status|journal-boot|env-check|disk|memory|doctor|restart|start|stop|update) ;;
+            summary|logs|status|journal-boot|env-check|disk|memory|doctor|smoke|telegram-check|restart|start|stop|update) ;;
             *) echo "Unsupported action: ${ACTION}" >&2; exit 2 ;;
           esac
 
