@@ -19,11 +19,18 @@ HERMES_CONFIG_DIR="${HERMES_CONFIG_DIR:-${HERMES_HOME}/.hermes}"
 WORKSPACE_DIR="${WORKSPACE_DIR:-${HERMES_HOME}/workspace}"
 # Stable, agent-suitable default; override via HERMES_MODEL. HERMES_MODEL may
 # also be an ordered fallback chain, e.g. "gemini-3.5-pro, gemini-3.5-flash".
-# The first entry becomes model.default; the rest become fallback_providers in
-# order, all using the Gemini provider.
+# The first currently available entry becomes model.default; the rest become
+# fallback_providers in order, all using the Gemini provider.
 HERMES_MODEL_RAW="${HERMES_MODEL:-gemini-3.5-flash}"
 # Gemini's OpenAI-compatible endpoint, per Google's API docs.
 GEMINI_BASE_URL="${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai/}"
+GEMINI_ENV_FILE="${GEMINI_ENV_FILE:-/etc/hermes-agent/hermes.env}"
+# Fast deploy-time probe used only to pick a currently usable primary model.
+# It avoids starting Hermes on a model that is already rate/quota/auth/model-name
+# limited, while preserving the user's preference order among usable models.
+HERMES_MODEL_PROBE_TIMEOUT="${HERMES_MODEL_PROBE_TIMEOUT:-6}"
+HERMES_MODEL_PROBE_CONNECT_TIMEOUT="${HERMES_MODEL_PROBE_CONNECT_TIMEOUT:-2}"
+HERMES_SKIP_MODEL_PROBE="${HERMES_SKIP_MODEL_PROBE:-false}"
 
 HERMES_BIN="${HERMES_HOME}/.local/bin/hermes"
 declare -a HERMES_MODEL_CHAIN=()
@@ -71,10 +78,94 @@ yaml_quote() {
   printf "'%s'" "${escaped}"
 }
 
+json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+read_env_file_value() {
+  local name="$1"
+  local file="$2"
+  [ -r "${file}" ] || return 0
+  awk -F= -v name="${name}" '
+    $1 == name { value = substr($0, index($0, "=") + 1) }
+    END { print value }
+  ' "${file}"
+}
+
+resolve_gemini_api_key() {
+  local key="${GEMINI_API_KEY:-${GOOGLE_API_KEY:-}}"
+  if [ -z "${key}" ]; then
+    key="$(read_env_file_value GEMINI_API_KEY "${GEMINI_ENV_FILE}")"
+  fi
+  if [ -z "${key}" ]; then
+    key="$(read_env_file_value GOOGLE_API_KEY "${GEMINI_ENV_FILE}")"
+  fi
+  printf '%s' "${key}"
+}
+
+probe_gemini_model() {
+  local model="$1"
+  local api_key="$2"
+  local tmp_file status escaped_model
+  tmp_file="$(mktemp)"
+  escaped_model="$(json_escape "${model}")"
+
+  status="$({
+    curl -sS -o "${tmp_file}" -w '%{http_code}' \
+      --connect-timeout "${HERMES_MODEL_PROBE_CONNECT_TIMEOUT}" \
+      --max-time "${HERMES_MODEL_PROBE_TIMEOUT}" \
+      -H "Authorization: Bearer ${api_key}" \
+      -H 'Content-Type: application/json' \
+      "${GEMINI_BASE_URL%/}/chat/completions" \
+      -d "{\"model\":\"${escaped_model}\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":1,\"temperature\":0}"
+  } 2>/dev/null || true)"
+
+  rm -f "${tmp_file}"
+  [ "${status}" = "200" ]
+}
+
+fast_fail_unavailable_models() {
+  local api_key model
+  local -a available=()
+  local -a unavailable=()
+
+  case "${HERMES_SKIP_MODEL_PROBE}" in
+    true|1|yes)
+      log "Skipping Gemini model availability probe."
+      return 0
+      ;;
+  esac
+
+  api_key="$(resolve_gemini_api_key)"
+  if [ -z "${api_key}" ]; then
+    log "Skipping Gemini model availability probe: no GEMINI_API_KEY/GOOGLE_API_KEY found."
+    return 0
+  fi
+
+  log "Probing Gemini model chain with ${HERMES_MODEL_PROBE_TIMEOUT}s max per model."
+  for model in "${HERMES_MODEL_CHAIN[@]}"; do
+    if probe_gemini_model "${model}" "${api_key}"; then
+      available+=("${model}")
+      log "Model probe passed: ${model}"
+    else
+      unavailable+=("${model}")
+      log "Model probe failed fast: ${model}; keeping it later in the fallback chain."
+    fi
+  done
+
+  if [ "${#available[@]}" -gt 0 ] && [ "${#unavailable[@]}" -gt 0 ]; then
+    HERMES_MODEL_CHAIN=("${available[@]}" "${unavailable[@]}")
+    log "Using first currently available model as primary: ${HERMES_MODEL_CHAIN[0]}"
+  elif [ "${#available[@]}" -eq 0 ]; then
+    log "No model in the chain passed the fast probe; preserving configured order and letting Hermes report runtime errors."
+  fi
+}
+
 parse_model_chain "${HERMES_MODEL_RAW}"
 if [ "${#HERMES_MODEL_CHAIN[@]}" -eq 0 ]; then
   HERMES_MODEL_CHAIN=("gemini-3.5-flash")
 fi
+fast_fail_unavailable_models
 HERMES_MODEL="${HERMES_MODEL_CHAIN[0]}"
 if [ "${#HERMES_MODEL_CHAIN[@]}" -gt 1 ]; then
   HERMES_MODEL_FALLBACKS=("${HERMES_MODEL_CHAIN[@]:1}")
