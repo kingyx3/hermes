@@ -9,11 +9,15 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Pull and diff but do not commit/push"
+        description: "Pull and diff but do not commit/push/open PR"
         type: boolean
         default: false
       branch:
-        description: "Target branch to commit to (blank = main)"
+        description: "Base branch for the sync PR (blank = main)"
+        type: string
+        default: ""
+      sync_branch:
+        description: "Branch to push sync commits to (blank = hermes-sync)"
         type: string
         default: ""
 
@@ -96,9 +100,10 @@ jobs:
           PROJECT_ID: ${{ steps.cfg.outputs.project_id }}
         run: scripts/ssh-iap.sh down || true
 
-      - name: Commit and push snapshot
+      - name: Commit and open snapshot PR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET_BRANCH: ${{ inputs.branch || 'main' }}
+          SYNC_BRANCH: ${{ inputs.sync_branch || 'hermes-sync' }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: scripts/sync-commit.sh
