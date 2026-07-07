@@ -12,14 +12,15 @@
 # Required env: GITHUB_TOKEN (used by gh to create/update the PR)
 # Optional env: TARGET_BRANCH (default main), DRY_RUN (0/1),
 #               SYNC_BRANCH (default hermes-sync),
-#               MAX_GIT_BLOB_BYTES (default 95000000)
+#               MAX_GIT_BLOB_BYTES (default 50000000)
 # ===========================================================================
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_BRANCH="${TARGET_BRANCH:-main}"
 SYNC_BRANCH="${SYNC_BRANCH:-hermes-sync}"
 DRY_RUN="${DRY_RUN:-0}"
-MAX_GIT_BLOB_BYTES="${MAX_GIT_BLOB_BYTES:-95000000}"
+MAX_GIT_BLOB_BYTES="${MAX_GIT_BLOB_BYTES:-50000000}"
 COMMIT_MSG="chore(sync): update Hermes workspace snapshot"
 
 log() { printf '[sync-commit] %s\n' "$*"; }
@@ -29,21 +30,8 @@ git config user.email "hermes-agent[bot]@users.noreply.github.com"
 
 git add -A .hermes workspace 2>/dev/null || git add -A
 
-# Defense in depth: rsync excludes should keep generated runtimes out of the
-# snapshot, but never allow a single large blob to make the push fail with GH001.
-large_files=()
-while IFS= read -r -d '' path; do
-  if [ -f "${path}" ]; then
-    size="$(wc -c < "${path}" | tr -d '[:space:]')"
-    if [ "${size}" -ge "${MAX_GIT_BLOB_BYTES}" ]; then
-      large_files+=("${path}")
-      log "Skipping oversized file (${size} bytes): ${path}"
-    fi
-  fi
-done < <(git diff --cached --name-only -z)
-
-if [ "${#large_files[@]}" -gt 0 ]; then
-  git reset -q HEAD -- "${large_files[@]}" || true
+if [ -f "${SCRIPT_DIR}/sync-validate.sh" ]; then
+  MAX_GIT_BLOB_BYTES="${MAX_GIT_BLOB_BYTES}" bash "${SCRIPT_DIR}/sync-validate.sh"
 fi
 
 if git diff --cached --quiet; then
@@ -51,8 +39,11 @@ if git diff --cached --quiet; then
   exit 0
 fi
 
-log "Changes detected:"
-git --no-pager diff --cached --stat || true
+log "Staged sync files:"
+git --no-pager diff --cached --name-status | sed 's/^/[sync-commit]   /'
+
+log "Staged sync diffstat:"
+git --no-pager diff --cached --stat | sed 's/^/[sync-commit]   /' || true
 
 if [ "${DRY_RUN}" = "1" ]; then
   log "DRY_RUN=1 — not committing, pushing, or opening a PR."

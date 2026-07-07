@@ -1,0 +1,80 @@
+# rsync filter rules for .hermes.
+# This file is allowlist-first: only durable user/agent-authored state should be
+# copied from the VM. Runtime installs, generated files, caches, logs, sessions,
+# browsers, package managers, and secrets are denied before any includes.
+
+# ---- Secrets and credentials: deny first -----------------------------------
+- /.env
+- /.env.*
+- /**/.env
+- /**/.env.*
+- /auth.json
+- /**/auth.json
+- /credentials*
+- /**/credentials*
+- /token*
+- /**/token*
+- /*secret*
+- /**/*secret*
+- /*credential*
+- /**/*credential*
+- /*service-account*.json
+- /**/*service-account*.json
+- /*sa-key*.json
+- /**/*sa-key*.json
+- /*.pem
+- /**/*.pem
+- /*.key
+- /**/*.key
+- /id_rsa*
+- /**/id_rsa*
+- /id_ed25519*
+- /**/id_ed25519*
+- /google_compute_engine*
+- /**/google_compute_engine*
+
+# ---- Installed Hermes/runtime state: never sync ----------------------------
+- /bin/***
+- /node/***
+- /hermes-agent/***
+- /venvs/***
+- /cache/***
+- /logs/***
+- /sessions/***
+- /.cache/***
+- /node_modules/***
+- /**/node_modules/***
+- /**/.venv/***
+- /**/venv/***
+- /**/__pycache__/***
+- /**/dist/***
+- /**/build/***
+
+# ---- Durable Hermes state: sync --------------------------------------------
++ /memory/***
++ /memories/***
++ /skills/***
++ /skill/***
++ /knowledge/***
++ /notes/***
++ /tasks/***
++ /todos/***
++ /scheduler/***
++ /schedule/***
++ /state/***
++ /projects/***
++ /profile/***
++ /preferences/***
++ /sync-manifest.txt
++ /sync-manifest.json
++ /README.md
++ /SKILL.md
++ /**/SKILL.md
++ /*.md
++ /**/*.md
++ /*.json
++ /**/*.json
++ */
+
+# Everything else is excluded by default.
+- *
