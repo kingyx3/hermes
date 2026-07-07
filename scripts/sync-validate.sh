@@ -43,7 +43,7 @@ while IFS= read -r -d '' path; do
   lower="$(printf '%s' "${path}" | tr '[:upper:]' '[:lower:]')"
 
   case "${lower}" in
-    */.env|*/.env.*|.env|.env.*|*/auth.json|auth.json|*credential*|*credentials*|*secret*|*token*|*service-account*.json|*sa-key*.json|*.pem|*.key|*/id_rsa*|id_rsa*|*/id_ed25519*|id_ed25519*|*/google_compute_engine*|google_compute_engine*)
+    */.env|*/.env.*|.env|.env.*|*/auth.json|auth.json|*credential*|*secret*|*token*|*service-account*.json|*sa-key*.json|*.pem|*.key|*/id_rsa*|id_rsa*|*/id_ed25519*|id_ed25519*|*/google_compute_engine*|google_compute_engine*)
       block_file "${path}" "secret or credential-like path"
       continue
       ;;
