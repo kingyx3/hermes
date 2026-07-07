@@ -1,0 +1,101 @@
+{
+  "jobs": [
+    {
+      "id": "72b64d07c5eb",
+      "name": "Weekly Briefing",
+      "prompt": "Provide a concise weekly summary of key developments. Specifically:\n1. Top trending tech/AI news.\n2. Any updates or news regarding the upcoming HDB Sale of Balance Flats (SBF) exercises.\n\nKeep the summary brief and structured.",
+      "skills": [],
+      "skill": null,
+      "model": "null",
+      "provider": "null",
+      "provider_snapshot": null,
+      "model_snapshot": null,
+      "base_url": null,
+      "script": null,
+      "no_agent": false,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 1 * * 1",
+        "display": "0 1 * * 1"
+      },
+      "schedule_display": "0 1 * * 1",
+      "repeat": {
+        "times": null,
+        "completed": 1
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-07-06T01:12:16.083455+00:00",
+      "next_run_at": "2026-07-13T01:00:00+00:00",
+      "last_run_at": "2026-07-06T01:19:10.506239+00:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "origin",
+      "origin": {
+        "platform": "telegram",
+        "chat_id": "188519828",
+        "chat_name": "J",
+        "thread_id": null,
+        "user_id": "188519828"
+      },
+      "enabled_toolsets": [
+        "web"
+      ],
+      "workdir": null,
+      "fire_claim": null
+    },
+    {
+      "id": "7d1d442b1611",
+      "name": "Daily Briefing",
+      "prompt": "Provide a concise daily briefing on global finance and AI. \n1. **AI & Tech:** Top 2-3 key headlines with links.\n2. **Global Finance:** Top 2-3 key headlines with links.\n3. **US Market Movers:** If the US market was open, report index changes (S&P 500, Nasdaq, Dow) and the top 2-3 specific stock gainers/losers with percentage changes and brief context. If the market was closed, omit this section.\n\nKeep it structured, readable, and direct.",
+      "skills": [],
+      "skill": null,
+      "model": "null",
+      "provider": "null",
+      "provider_snapshot": null,
+      "model_snapshot": null,
+      "base_url": null,
+      "script": null,
+      "no_agent": false,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 0 * * *",
+        "display": "0 0 * * *"
+      },
+      "schedule_display": "0 0 * * *",
+      "repeat": {
+        "times": null,
+        "completed": 8
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-07-06T01:13:07.975541+00:00",
+      "next_run_at": "2026-07-08T00:00:00+00:00",
+      "last_run_at": "2026-07-07T00:45:06.272795+00:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "origin",
+      "origin": {
+        "platform": "telegram",
+        "chat_id": "188519828",
+        "chat_name": "J",
+        "thread_id": null,
+        "user_id": "188519828"
+      },
+      "enabled_toolsets": [
+        "web"
+      ],
+      "workdir": null,
+      "fire_claim": null
+    }
+  ],
+  "updated_at": "2026-07-07T00:45:06.273555+00:00"
+}
