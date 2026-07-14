@@ -17,7 +17,11 @@ EnvironmentFile=/etc/hermes-agent/hermes.env
 Environment=HERMES_HOME=${HERMES_CONFIG_DIR}
 Environment=XDG_STATE_HOME=${HERMES_CONFIG_DIR}/state
 Environment=HERMES_GATEWAY_LOCK_DIR=${HERMES_CONFIG_DIR}/state/hermes/gateway-locks
-Environment=PATH=${HERMES_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Keep the Hermes Python environment first so bundled skills that invoke
+# `python` use the same interpreter that owns their optional dependencies.
+# Both paths are included because upstream installations have used venv/ and
+# .venv/ layouts. Non-existent PATH entries are harmless.
+Environment=PATH=${HERMES_CONFIG_DIR}/hermes-agent/venv/bin:${HERMES_CONFIG_DIR}/hermes-agent/.venv/bin:${HERMES_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 # Unattended background entrypoint. `hermes gateway` (no subcommand) runs the
 # messaging gateway in the foreground -- there is no `gateway run` subcommand.
