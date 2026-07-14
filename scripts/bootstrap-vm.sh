@@ -29,6 +29,8 @@ log() { printf '[bootstrap] %s\n' "$*"; }
 install_hermes_venv_package_if_missing() {
   local import_name="$1"
   local package_name="$2"
+  local required="${3:-0}"
+  local purpose="${4:-an optional Hermes feature}"
   local python_bin=""
   local candidate
 
@@ -42,7 +44,8 @@ install_hermes_venv_package_if_missing() {
   done
 
   if [ -z "${python_bin}" ]; then
-    log "Hermes venv python not found; skipping optional ${package_name} install."
+    log "Hermes venv python not found; cannot install ${package_name} for ${purpose}."
+    [ "${required}" = "1" ] && return 1
     return 0
   fi
 
@@ -51,11 +54,11 @@ install_hermes_venv_package_if_missing() {
       HOME="${HERMES_HOME}" \
       HERMES_GATEWAY_LOCK_DIR="${HERMES_GATEWAY_LOCK_DIR}" \
       "${python_bin}" -c "import ${import_name}" >/dev/null 2>&1; then
-    log "Optional Python package ${package_name} already installed."
+    log "Python package ${package_name} already installed for ${purpose}."
     return 0
   fi
 
-  log "Installing optional Python package ${package_name} for free web search fallback..."
+  log "Installing Python package ${package_name} for ${purpose}..."
   sudo -u "${HERMES_USER}" \
     HERMES_HOME="${HERMES_CONFIG_DIR}" \
     HOME="${HERMES_HOME}" \
@@ -68,12 +71,16 @@ install_hermes_venv_package_if_missing() {
       "${python_bin}" -m ensurepip --upgrade >/dev/null 2>&1 \
     || true
 
-  sudo -u "${HERMES_USER}" \
-    HERMES_HOME="${HERMES_CONFIG_DIR}" \
-    HOME="${HERMES_HOME}" \
-    HERMES_GATEWAY_LOCK_DIR="${HERMES_GATEWAY_LOCK_DIR}" \
-    "${python_bin}" -m pip install --quiet "${package_name}" \
-    || log "WARNING: Could not install optional ${package_name}; web-search tools may stay disabled until a web backend key is configured."
+  if ! sudo -u "${HERMES_USER}" \
+      HERMES_HOME="${HERMES_CONFIG_DIR}" \
+      HOME="${HERMES_HOME}" \
+      HERMES_GATEWAY_LOCK_DIR="${HERMES_GATEWAY_LOCK_DIR}" \
+      "${python_bin}" -m pip install --quiet "${package_name}"; then
+    log "WARNING: Could not install ${package_name} for ${purpose}."
+    [ "${required}" = "1" ] && return 1
+  fi
+
+  return 0
 }
 
 # --- 1. Minimal OS packages -------------------------------------------------
@@ -131,7 +138,16 @@ fi
 # Hermes' default web toolset can use ddgs as a no-key/free search fallback.
 # Installing it avoids doctor reporting missing web API keys on a Telegram VM
 # that only needs Gemini for the model.
-install_hermes_venv_package_if_missing ddgs ddgs
+install_hermes_venv_package_if_missing ddgs ddgs 0 "free web search fallback"
+
+# The OAuth workflow installs these packages initially. Re-check them on every
+# deploy once a Google Desktop client exists, because a Hermes update or venv
+# rebuild can replace the environment while leaving the OAuth token intact.
+if sudo -u "${HERMES_USER}" test -f "${HERMES_CONFIG_DIR}/google_client_secret.json"; then
+  install_hermes_venv_package_if_missing googleapiclient google-api-python-client 1 "Google Workspace"
+  install_hermes_venv_package_if_missing google_auth_oauthlib google-auth-oauthlib 1 "Google Workspace"
+  install_hermes_venv_package_if_missing google_auth_httplib2 google-auth-httplib2 1 "Google Workspace"
+fi
 
 # --- 5. Trim caches to keep the disk small ----------------------------------
 log "Cleaning package-manager caches..."
