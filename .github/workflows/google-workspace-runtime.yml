@@ -1,0 +1,140 @@
+name: Google Workspace Runtime Repair
+
+# Installs the repository-managed Gmail/Calendar skill overlay and explicit
+# Hermes-venv API wrapper. Runs after every successful deploy and can also be
+# dispatched manually for immediate repair.
+on:
+  workflow_run:
+    workflows:
+      - Deploy Hermes Agent
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hermes-infra
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Resolve configuration
+        id: cfg
+        run: |
+          set -euo pipefail
+          PROJECT_ID="${{ vars.GCP_PROJECT_ID }}"
+          if [ -z "${PROJECT_ID}" ]; then
+            PROJECT_ID="$(jq -r '.project_id' "${GOOGLE_APPLICATION_CREDENTIALS}")"
+          fi
+          [ -n "${PROJECT_ID}" ] && [ "${PROJECT_ID}" != "null" ] || { echo "Could not resolve project_id"; exit 1; }
+
+          ZONE="${{ vars.GCP_ZONE }}";            ZONE="${ZONE:-us-central1-a}"
+          VM_NAME="${{ vars.GCP_VM_NAME }}";      VM_NAME="${VM_NAME:-hermes-agent}"
+          HERMES_USER="${{ vars.HERMES_USER }}";  HERMES_USER="${HERMES_USER:-hermes}"
+          HERMES_USER_HOME="${{ vars.HERMES_HOME }}"; HERMES_USER_HOME="${HERMES_USER_HOME:-/home/hermes}"
+
+          {
+            echo "project_id=${PROJECT_ID}"
+            echo "zone=${ZONE}"
+            echo "vm_name=${VM_NAME}"
+            echo "hermes_user=${HERMES_USER}"
+            echo "hermes_user_home=${HERMES_USER_HOME}"
+            echo "hermes_config_dir=${HERMES_USER_HOME}/.hermes"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Establish ephemeral SSH over IAP
+        id: ssh
+        env:
+          VM_NAME: ${{ steps.cfg.outputs.vm_name }}
+          ZONE: ${{ steps.cfg.outputs.zone }}
+          PROJECT_ID: ${{ steps.cfg.outputs.project_id }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/*.sh
+          ENV_FILE="$(scripts/ssh-iap.sh up)"
+          echo "env_file=${ENV_FILE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install managed Google Workspace runtime
+        env:
+          HERMES_USER: ${{ steps.cfg.outputs.hermes_user }}
+          HERMES_USER_HOME: ${{ steps.cfg.outputs.hermes_user_home }}
+          HERMES_CONFIG_DIR: ${{ steps.cfg.outputs.hermes_config_dir }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1090
+          source "${{ steps.ssh.outputs.env_file }}"
+          SSH="ssh -i ${SSH_KEY} -p ${SSH_PORT} ${SSH_OPTS} ${SSH_USER}@localhost"
+          SCP="scp -i ${SSH_KEY} -P ${SSH_PORT} ${SSH_OPTS}"
+
+          for i in $(seq 1 30); do
+            if ${SSH} true 2>/dev/null; then break; fi
+            [ "${i}" = "30" ] && { echo "VM SSH not ready"; exit 1; }
+            sleep 5
+          done
+
+          ${SSH} 'rm -rf /tmp/hermes-google-runtime && mkdir -p -m 0700 /tmp/hermes-google-runtime/google-workspace-skill'
+          ${SCP} scripts/google-workspace-oauth.py \
+                 scripts/hermes-google-workspace.sh \
+                 scripts/hermes-google-api.sh \
+                 scripts/install-google-workspace.sh \
+                 "${SSH_USER}@localhost:/tmp/hermes-google-runtime/"
+          ${SCP} skills/google-workspace/SKILL.md \
+                 "${SSH_USER}@localhost:/tmp/hermes-google-runtime/google-workspace-skill/SKILL.md"
+
+          ${SSH} "sudo env \
+            HERMES_USER='${HERMES_USER}' \
+            HERMES_USER_HOME='${HERMES_USER_HOME}' \
+            HERMES_CONFIG_DIR='${HERMES_CONFIG_DIR}' \
+            SKILL_SOURCE='/tmp/hermes-google-runtime/google-workspace-skill/SKILL.md' \
+            bash /tmp/hermes-google-runtime/install-google-workspace.sh"
+
+          ${SSH} 'sudo systemctl restart hermes-agent.service'
+
+          if ${SSH} "sudo -u '${HERMES_USER}' test -f '${HERMES_CONFIG_DIR}/google_token.json'"; then
+            ${SSH} "sudo -u '${HERMES_USER}' env \
+              HOME='${HERMES_USER_HOME}' \
+              HERMES_USER_HOME='${HERMES_USER_HOME}' \
+              HERMES_CONFIG_DIR='${HERMES_CONFIG_DIR}' \
+              /usr/local/bin/hermes-google-workspace check"
+            ${SSH} "sudo -u '${HERMES_USER}' env \
+              HOME='${HERMES_USER_HOME}' \
+              HERMES_USER_HOME='${HERMES_USER_HOME}' \
+              HERMES_CONFIG_DIR='${HERMES_CONFIG_DIR}' \
+              /usr/local/bin/hermes-google-api gmail labels >/dev/null"
+            echo "AGENT_RUNTIME_READY: managed Google skill and Gmail API command passed."
+          else
+            echo "GOOGLE_RUNTIME_READY_NOT_AUTHENTICATED: complete the Google Workspace OAuth workflow."
+          fi
+
+      - name: Remove temporary VM files
+        if: always() && steps.ssh.outcome == 'success'
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1090
+          source "${{ steps.ssh.outputs.env_file }}"
+          SSH="ssh -i ${SSH_KEY} -p ${SSH_PORT} ${SSH_OPTS} ${SSH_USER}@localhost"
+          ${SSH} 'rm -rf /tmp/hermes-google-runtime' || true
+
+      - name: Tear down ephemeral SSH
+        if: always()
+        env:
+          VM_NAME: ${{ steps.cfg.outputs.vm_name }}
+          ZONE: ${{ steps.cfg.outputs.zone }}
+          PROJECT_ID: ${{ steps.cfg.outputs.project_id }}
+        run: scripts/ssh-iap.sh down || true
