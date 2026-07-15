@@ -1,7 +1,7 @@
 ---
 name: google-workspace
 description: "Managed personal Google services for Gmail, Calendar, Contacts, and a folder-bound Drive/Docs/Sheets workspace. Use this skill for every configured Google service request."
-version: 1.3.0
+version: 1.4.0
 platforms: [linux]
 required_credential_files:
   - path: google_token.json
@@ -18,7 +18,8 @@ metadata:
 Use the repository-managed integrations for Gmail, Calendar, Google Contacts,
 Drive, Docs, and Sheets. The services use separately stored least-privilege
 OAuth tokens. Contacts uses the People API with read/write access, while Drive,
-Docs, and Sheets remain restricted to the app-owned `hermes` folder.
+Docs, and Sheets remain restricted to the app-owned `hermes` folder and all of
+its descendants.
 
 All runtime clients use only Python's standard library. They do **not** import
 `googleapiclient`, `google-auth`, or any pip package.
@@ -32,13 +33,16 @@ All runtime clients use only Python's standard library. They do **not** import
    substitute Drive, Docs, Sheets, or a contact spreadsheet.
 3. Never claim Contacts are unavailable before testing the Contacts runtime and
    token with the documented health command.
-4. Do **not** switch to `himalaya` merely because a request mentions email only.
-5. Do **not** run `pip`, `pip install`, `setup.py`, or `ensurepip`.
-6. Use the exact scripts and `/usr/bin/python3`; do not depend on shell `PATH`.
-7. If a script is missing, report that **Google Workspace Runtime Repair** must
+4. A request to organize files, create folders or subfolders, list a folder,
+   move a managed file, or create a Doc/Sheet in a named folder must use the
+   recursive Drive client below. Do not claim nested folders are unsupported.
+5. Do **not** switch to `himalaya` merely because a request mentions email only.
+6. Do **not** run `pip`, `pip install`, `setup.py`, or `ensurepip`.
+7. Use the exact scripts and `/usr/bin/python3`; do not depend on shell `PATH`.
+8. If a script is missing, report that **Google Workspace Runtime Repair** must
    be run.
-8. Never broaden Drive access or use another Drive tool. Drive, Docs, and Sheets
-   operations must go through the folder-bound client described below.
+9. Never broaden Drive access or use another Drive tool. Every Drive, Docs, and
+   Sheets operation must remain beneath the managed `hermes` root.
 
 ## Exact runtime paths
 
@@ -186,23 +190,25 @@ Only after explicit user confirmation:
 
 ## Drive workspace boundary
 
-Drive authorization is deliberately limited to the non-sensitive `drive.file`
-scope. The client creates one app-owned folder named exactly:
+Drive authorization remains limited to the non-sensitive `drive.file` scope.
+The client creates one app-owned folder named exactly:
 
 ```text
 hermes
 ```
 
-The client persists that folder's ID and enforces these rules in code:
+The client permits the managed root and any depth of folders, Docs, or Sheets
+beneath it. Every operation validates the complete parent chain back to that
+marked root. It rejects items outside the root, trashed ancestors, ancestry
+cycles, non-folder parents, and ambiguous multi-parent items.
 
-- list only direct children of the managed folder;
-- create Docs and Sheets directly inside it;
-- reject reads, edits, renames, or trash operations when the file is not a direct
-  child of the managed folder;
-- reject a managed folder that is renamed, trashed, or missing its app marker;
-- never search or operate across the user's wider Drive.
+Folder and file moves validate both the source and destination. The managed
+`hermes` root cannot be renamed, moved, or trashed, and a folder cannot be moved
+into itself or one of its descendants.
 
-Do not bypass these checks, use raw Drive URLs, or substitute another tool.
+Do not bypass these checks, use raw Drive URLs, or substitute another Drive
+tool. File IDs must come from `drive list`, `drive tree`, `drive get`, or a prior
+result from this client.
 
 ### Drive workspace health
 
@@ -213,35 +219,69 @@ Run before the first Drive, Docs, or Sheets operation in a conversation:
 ```
 
 A healthy response contains `"ready": true`, folder name `"hermes"`, and
-`"boundary": "direct-children-only"`.
+`"boundary": "managed-descendants-only"`.
 
 When `google_drive_token.json` is missing, tell the operator to run **Google
 Workspace Setup** with `service=drive`. Do not start OAuth from Telegram.
 
-### Drive files
+### Inspect folders and files
+
+These read operations do not require confirmation:
 
 ```bash
-# Ensure the managed folder exists. Safe and idempotent.
-/usr/bin/python3 "$DAPI" workspace ensure
-
-# List files only inside hermes.
+# List direct children of the hermes root.
 /usr/bin/python3 "$DAPI" drive list --max 100
 
-# Inspect one managed file's metadata.
-/usr/bin/python3 "$DAPI" drive get FILE_ID
+# List direct children of a managed subfolder.
+/usr/bin/python3 "$DAPI" drive list --parent-id FOLDER_ID --max 100
 
-# Rename or trash only after an explicit request.
-/usr/bin/python3 "$DAPI" drive rename FILE_ID --name "New name"
-/usr/bin/python3 "$DAPI" drive trash FILE_ID
+# Return the complete managed tree with computed paths.
+/usr/bin/python3 "$DAPI" drive tree --max 500
+
+# Inspect one managed file or folder and its path.
+/usr/bin/python3 "$DAPI" drive get FILE_ID
 ```
+
+Use `drive tree` or progressively use `drive list --parent-id` to resolve a
+folder by name. When duplicate names exist, show the matching paths and ask the
+user to choose before performing a mutation.
+
+### Create folders and subfolders
+
+Only after explicit user confirmation:
+
+```bash
+# Create a folder directly under hermes.
+/usr/bin/python3 "$DAPI" drive mkdir --name "Trips"
+
+# Create a nested folder under a validated managed folder.
+/usr/bin/python3 "$DAPI" drive mkdir --name "Japan" --parent-id TRIPS_FOLDER_ID
+```
+
+### Rename, move, or trash managed items
+
+Only after explicit user confirmation:
+
+```bash
+/usr/bin/python3 "$DAPI" drive rename FILE_OR_FOLDER_ID --name "New name"
+/usr/bin/python3 "$DAPI" drive move FILE_OR_FOLDER_ID --parent-id DESTINATION_FOLDER_ID
+/usr/bin/python3 "$DAPI" drive trash FILE_OR_FOLDER_ID
+```
+
+Before a move, resolve the destination folder through this client. Never guess a
+folder ID. Moving to the root uses the root folder ID returned by `workspace
+status` or `drive tree`.
 
 ### Google Docs
 
 ```bash
-# Create inside hermes.
+# Create in the hermes root, only after explicit user confirmation.
 /usr/bin/python3 "$DAPI" docs create --title "Meeting notes" --text "Initial content"
 
-# Read a managed document.
+# Create in a managed subfolder, only after explicit user confirmation.
+/usr/bin/python3 "$DAPI" docs create --title "Japan Trip Plan Nov 2026" --parent-id JAPAN_FOLDER_ID --text "Initial content"
+
+# Read a managed document at any depth.
 /usr/bin/python3 "$DAPI" docs get FILE_ID
 
 # Append only when the user asks to update the document.
@@ -251,20 +291,19 @@ Workspace Setup** with `service=drive`. Do not start OAuth from Telegram.
 ### Google Sheets
 
 ```bash
-# Create inside hermes, optionally with initial rows.
+# Create in the hermes root, only after explicit user confirmation.
 /usr/bin/python3 "$DAPI" sheets create --title "Tracker" --range "Sheet1!A1" --values-json '[["Task","Owner"],["Example","J"]]'
 
-# Read a managed range.
+# Create in a managed subfolder, only after explicit user confirmation.
+/usr/bin/python3 "$DAPI" sheets create --title "Japan Budget" --parent-id JAPAN_FOLDER_ID --range "Sheet1!A1" --values-json '[["Item","Cost"]]'
+
+# Read a managed range at any depth.
 /usr/bin/python3 "$DAPI" sheets get FILE_ID --range "Sheet1!A1:Z100"
 
 # Update or append only when explicitly requested.
 /usr/bin/python3 "$DAPI" sheets update FILE_ID --range "Sheet1!A1:B2" --values-json '[["Task","Owner"],["Example","J"]]'
 /usr/bin/python3 "$DAPI" sheets append FILE_ID --range "Sheet1!A:B" --values-json '[["Next task","J"]]'
 ```
-
-`--values-json` must be a JSON array of row arrays. Never construct a command
-that targets a file ID obtained outside `drive list` or a prior result from this
-folder-bound client.
 
 ## Operator-managed workflows
 
