@@ -2,126 +2,142 @@
 
 ## Symptoms
 
-The **Google Workspace OAuth** workflow completes successfully, including the
-`check` action, but Telegram shows one or both of these behaviors:
+OAuth and runtime-repair workflows report success, but Telegram still says:
 
-- Hermes says the Google API Python libraries are missing or cannot be installed.
-- Hermes loads the `himalaya` skill and runs `himalaya --version`, even though
-  Google OAuth is already configured.
+- `googleapiclient` or other Google Python libraries are missing;
+- pip is unavailable;
+- `hermes-google-api` cannot be found; or
+- Himalaya should be used instead.
 
-These are runtime or skill-routing problems. They do not normally mean the
-Google OAuth token is invalid.
+These messages can come from stale skill instructions or from an older
+`google_api.py`. They do not prove that the OAuth token is invalid.
 
-## Why OAuth check can pass while Hermes fails
+## Current runtime does not use googleapiclient
 
-The OAuth workflow invokes `/usr/local/bin/hermes-google-workspace`, which
-selects Hermes' private Python virtual environment explicitly. Older bundled
-Google Workspace instructions invoked `google_api.py` using plain `python`.
-Depending on the shell environment, that could resolve system Python instead of
-Hermes' venv.
-
-A Hermes update can also rebuild its virtual environment. The OAuth client and
-refresh token remain under `/home/hermes/.hermes`, while optional Python
-packages inside the replaced environment may need to be installed again.
-
-## Why Hermes selected Himalaya
-
-The upstream Google Workspace skill currently tells the agent that an
-email-only request should use the related `himalaya` skill. That advice is
-appropriate for a user choosing between two fresh setups, but it is incorrect
-for this deployment after Google OAuth is already configured.
-
-For example, the request:
+The repository-managed runtime client is:
 
 ```text
-Review my Gmail inbox and summarize messages in the last 30 days.
+/home/hermes/.hermes/skills/productivity/google-workspace/scripts/google_api.py
 ```
 
-may be classified as “email only,” causing Hermes to inspect Himalaya even
-though the repository-managed Gmail integration is ready.
+It uses only Python's standard library:
 
-## Repository-managed fix
+- `urllib` for OAuth refresh and Google REST requests;
+- `json` for request and response data;
+- `email` and `base64` for Gmail messages;
+- `argparse` for its CLI.
 
-This repository installs three safeguards:
+It does not import `googleapiclient`, `google-auth`, or `google-auth-oauthlib`.
+The active skill invokes it with the fixed interpreter `/usr/bin/python3`, so
+normal Gmail and Calendar usage is independent of Hermes' venv and pip.
 
-1. The Hermes venv directories are present on the gateway service `PATH`.
-2. Deploy bootstrap verifies the Google API Python packages whenever a Google
-   OAuth client is configured.
-3. **Google Workspace Runtime Repair** installs:
-   - `/usr/local/bin/hermes-google-workspace` for OAuth checks;
-   - `/usr/local/bin/hermes-google-api` for Gmail and Calendar operations;
-   - a managed `google-workspace` skill overlay that prefers configured Google
-     OAuth for email-only requests and does not fall back to Himalaya.
+The Google authentication libraries remain relevant only to the separate OAuth
+setup helper and **Google Workspace OAuth** workflow.
 
-The API wrapper selects Hermes' venv directly and runs the bundled
-`google_api.py`; it never depends on plain `python` shell resolution.
+## Why a previous runtime repair could still appear broken
 
-The repair workflow runs automatically after each successful **Deploy Hermes
-Agent** workflow. It can also be run manually.
+Earlier runtime repair versions verified a wrapper under `/usr/local/bin` that
+selected Hermes' venv. That test could pass over SSH while Telegram later used
+stale bundled instructions, plain `python`, or a different command-discovery
+path.
+
+The current repair is stricter. It:
+
+1. overwrites the active `SKILL.md`;
+2. overwrites the exact active `scripts/google_api.py` path;
+3. installs convenience wrappers in both `/usr/local/bin` and
+   `/home/hermes/.local/bin`;
+4. restarts `hermes-agent.service`;
+5. calls the active script directly with `/usr/bin/python3`;
+6. performs live Gmail and Calendar requests without importing any optional
+   package.
 
 ## Recovery steps
 
-After merging the fix:
+After merging the current fix:
 
 1. Run **Actions → Google Workspace Runtime Repair → Run workflow**.
-2. Confirm the log contains:
+2. Confirm the log contains exactly:
 
    ```text
-   AGENT_RUNTIME_READY: managed Google skill and Gmail API command passed.
+   AGENT_RUNTIME_READY_STDLIB: active skill client passed Gmail and Calendar without googleapiclient.
    ```
 
-3. Run **Actions → Google Workspace OAuth** with action `check`.
-4. Ask Hermes again:
+3. Send a **new** Telegram message:
 
    ```text
    Review my Gmail inbox and summarize messages in the last 30 days.
    ```
 
-The Telegram trace should show the `google-workspace` skill and
-`hermes-google-api`, not the Himalaya skill.
+A new message matters because a prior conversation turn may already contain the
+incorrect conclusion that Google libraries are required.
 
-You normally do **not** need to repeat OAuth authorization. The Desktop OAuth
-client and refresh token survive normal redeploys.
+Expected terminal commands include:
+
+```bash
+GAPI="${HERMES_HOME:-$HOME/.hermes}/skills/productivity/google-workspace/scripts/google_api.py"
+/usr/bin/python3 "$GAPI" check
+/usr/bin/python3 "$GAPI" gmail search "in:inbox newer_than:30d" --max 100
+```
+
+The trace should not show `himalaya --version`, `pip`, or an import check for
+`googleapiclient`.
 
 ## Full repair sequence
 
-When a normal runtime-repair run does not pass, run these workflows in order:
+Run these workflows in order when the runtime marker is not produced:
 
-1. **Google Workspace OAuth → `provision-client`**
-2. **Google Workspace Runtime Repair**
-3. **Google Workspace OAuth → `check`**
-4. **Deploy Hermes Agent** if the gateway itself is unhealthy
-5. Wait for the automatic post-deploy **Google Workspace Runtime Repair** run
+1. **Deploy Hermes Agent**
+2. wait for the automatic **Google Workspace Runtime Repair** run
+3. **Google Workspace OAuth → `provision-client`**
+4. complete `send-auth-link` and `exchange-callback` only when no token exists
+5. run **Google Workspace Runtime Repair** manually
 
-Do not configure Himalaya or a Gmail App Password unless you deliberately want
-a separate mail-client integration.
-
-## When reauthorization is actually needed
-
-Repeat `send-auth-link` and `exchange-callback` only when the OAuth `check`
-action reports an invalid, revoked, expired, or insufficient-scope token.
-Missing libraries, a missing wrapper, or Himalaya routing are not OAuth consent
-failures.
+Do not reauthorize merely because Telegram mentions missing libraries.
+Reauthorize only when the runtime repair or OAuth check reports a missing,
+revoked, expired, or insufficient-scope token.
 
 ## Interpreting runtime-repair results
 
-### `AGENT_RUNTIME_READY`
+### `AGENT_RUNTIME_READY_STDLIB`
 
-The managed skill is installed, OAuth is valid, and a Gmail API command passed
-using the exact wrapper the skill is instructed to call.
+The exact active skill script ran through `/usr/bin/python3`, refreshed the
+token when necessary, reached Gmail and Calendar, and did not require
+`googleapiclient`.
 
 ### `GOOGLE_RUNTIME_READY_NOT_AUTHENTICATED`
 
-The wrapper and skill are installed, but `google_token.json` is absent. Complete
-the authorization link and callback exchange documented in
-[`google-workspace.md`](google-workspace.md).
+The dependency-free client and skill are installed, but `google_token.json` is
+absent. Complete the authorization link and callback exchange documented in
+[`google-workspace.md`](google-workspace.md), then rerun runtime repair.
 
-### `Hermes Python venv not found`
+### `Google Workspace Runtime Repair is required: ...google_api.py is missing`
 
-Run **Deploy Hermes Agent** successfully, then rerun runtime repair.
+The active skill file exists but its managed script was not installed. Rerun
+runtime repair and inspect its file-install step.
 
-### Google dependency installation fails
+### OAuth refresh failure
 
-The VM needs outbound access while dependencies are repaired. With Telegram
-enabled, this deployment normally retains an ephemeral external IPv4 for
-outbound polling and API access. Check the deploy workflow and VM egress mode.
+The token exists but Google rejected its refresh token. Generate a fresh auth
+link, exchange the newest callback, delete the temporary callback secret, and
+rerun runtime repair.
+
+### Network or DNS failure
+
+The VM must have outbound HTTPS access to Google's OAuth, Gmail, and Calendar
+endpoints. With Telegram enabled, the deployment normally retains an ephemeral
+external IPv4. Check the deploy workflow's steady-state egress verification.
+
+## Operator instruction for an existing Telegram conversation
+
+When Hermes is repeating the old dependency conclusion, send:
+
+```text
+Discard the previous Google Python dependency diagnosis. The active
+Google Workspace client is standard-library-only. Load the google-workspace
+skill again and execute the exact /usr/bin/python3 command documented there.
+Do not check for googleapiclient, use pip, or load Himalaya.
+```
+
+Starting a new Telegram conversation/message after service restart is still the
+preferred verification method.

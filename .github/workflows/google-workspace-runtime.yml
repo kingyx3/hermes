@@ -1,8 +1,8 @@
 name: Google Workspace Runtime Repair
 
-# Installs the repository-managed Gmail/Calendar skill overlay and explicit
-# Hermes-venv API wrapper. Runs after every successful deploy and can also be
-# dispatched manually for immediate repair.
+# Installs the repository-managed Gmail/Calendar skill and a dependency-free
+# API client at the exact active skill path. Runs after every successful deploy
+# and can also be dispatched manually for immediate repair.
 on:
   workflow_run:
     workflows:
@@ -90,6 +90,7 @@ jobs:
 
           ${SSH} 'rm -rf /tmp/hermes-google-runtime && mkdir -p -m 0700 /tmp/hermes-google-runtime/google-workspace-skill'
           ${SCP} scripts/google-workspace-oauth.py \
+                 scripts/google-workspace-api.py \
                  scripts/hermes-google-workspace.sh \
                  scripts/hermes-google-api.sh \
                  scripts/install-google-workspace.sh \
@@ -102,22 +103,27 @@ jobs:
             HERMES_USER_HOME='${HERMES_USER_HOME}' \
             HERMES_CONFIG_DIR='${HERMES_CONFIG_DIR}' \
             SKILL_SOURCE='/tmp/hermes-google-runtime/google-workspace-skill/SKILL.md' \
+            API_SOURCE='/tmp/hermes-google-runtime/google-workspace-api.py' \
             bash /tmp/hermes-google-runtime/install-google-workspace.sh"
 
           ${SSH} 'sudo systemctl restart hermes-agent.service'
 
+          ACTIVE_API="${HERMES_CONFIG_DIR}/skills/productivity/google-workspace/scripts/google_api.py"
+          ${SSH} "sudo -u '${HERMES_USER}' test -x '${ACTIVE_API}'"
+          ${SSH} "sudo -u '${HERMES_USER}' grep -q 'runtime.*python-stdlib\|Dependency-free Gmail' '${ACTIVE_API}'"
+
           if ${SSH} "sudo -u '${HERMES_USER}' test -f '${HERMES_CONFIG_DIR}/google_token.json'"; then
             ${SSH} "sudo -u '${HERMES_USER}' env \
               HOME='${HERMES_USER_HOME}' \
-              HERMES_USER_HOME='${HERMES_USER_HOME}' \
+              HERMES_HOME='${HERMES_CONFIG_DIR}' \
               HERMES_CONFIG_DIR='${HERMES_CONFIG_DIR}' \
-              /usr/local/bin/hermes-google-workspace check"
+              /usr/bin/python3 '${ACTIVE_API}' check"
             ${SSH} "sudo -u '${HERMES_USER}' env \
               HOME='${HERMES_USER_HOME}' \
-              HERMES_USER_HOME='${HERMES_USER_HOME}' \
+              HERMES_HOME='${HERMES_CONFIG_DIR}' \
               HERMES_CONFIG_DIR='${HERMES_CONFIG_DIR}' \
-              /usr/local/bin/hermes-google-api gmail labels >/dev/null"
-            echo "AGENT_RUNTIME_READY: managed Google skill and Gmail API command passed."
+              /usr/bin/python3 '${ACTIVE_API}' gmail labels >/dev/null"
+            echo "AGENT_RUNTIME_READY_STDLIB: active skill client passed Gmail and Calendar without googleapiclient."
           else
             echo "GOOGLE_RUNTIME_READY_NOT_AUTHENTICATED: complete the Google Workspace OAuth workflow."
           fi

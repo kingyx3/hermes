@@ -1,7 +1,7 @@
 ---
 name: google-workspace
 description: "Personal Gmail and Google Calendar through the repository-managed OAuth integration. Always prefer this skill over Himalaya when Google credentials are configured."
-version: 1.0.0
+version: 1.1.0
 platforms: [linux]
 required_credential_files:
   - path: google_token.json
@@ -19,65 +19,81 @@ Use the repository-managed Google OAuth integration for Gmail and Calendar.
 This deployment is already configured through GitHub Actions; do not start a
 new OAuth flow from Telegram unless the user explicitly asks to reauthorize.
 
+The API client installed at the path below uses only Python's standard library.
+It does **not** import `googleapiclient`, `google-auth`, or any pip package.
+
 ## Routing rules
 
 1. For every Gmail or Google Calendar request, use this skill first.
 2. Do **not** switch to the `himalaya` skill merely because a request mentions
-   email only. Himalaya is an unrelated App Password setup and is not required
-   for this deployment.
-3. Do **not** run `pip`, `pip install`, `setup.py`, or attempt to alter the
-   system Python environment from an agent conversation.
-4. Use the fixed commands below. They explicitly select Hermes' Python virtual
-   environment and do not depend on shell `python` resolution.
-5. When a command fails, report its concise error output. Tell the operator to
-   run **Deploy Hermes Agent**, followed by **Google Workspace OAuth → check**.
-   Do not recommend replacing OAuth with Himalaya unless the user specifically
-   requests an App Password based setup.
+   email only. Himalaya is an unrelated App Password setup and is not required.
+3. Do **not** run `pip`, `pip install`, `setup.py`, `ensurepip`, or attempt to
+   alter system Python from an agent conversation.
+4. Do not test for `googleapiclient`; this managed runtime does not use it.
+5. Use the exact script and interpreter below. Do not rely on command discovery,
+   shell aliases, a virtual environment, or `/usr/local/bin` being on `PATH`.
+6. If the exact script is missing, report only that **Google Workspace Runtime
+   Repair** must be run. Do not recommend Himalaya or manual browser checking.
+
+## Required command prefix
+
+Define this before every Gmail or Calendar operation:
+
+```bash
+GAPI="${HERMES_HOME:-$HOME/.hermes}/skills/productivity/google-workspace/scripts/google_api.py"
+test -f "$GAPI" || { echo "Google Workspace Runtime Repair is required: $GAPI is missing" >&2; exit 1; }
+```
+
+Run the client only as:
+
+```bash
+/usr/bin/python3 "$GAPI"
+```
+
+`hermes-google-api` is also installed as a convenience, but the exact script
+path above is authoritative and must be used when command discovery is unclear.
 
 ## Health check
 
 Run this before the first Gmail or Calendar operation in a conversation:
 
 ```bash
-hermes-google-workspace check
+GAPI="${HERMES_HOME:-$HOME/.hermes}/skills/productivity/google-workspace/scripts/google_api.py"
+/usr/bin/python3 "$GAPI" check
 ```
 
-A healthy result contains:
+A healthy response is JSON containing:
 
-```text
-AUTHENTICATED: Gmail and Calendar API checks passed
+```json
+{
+  "authenticated": true,
+  "calendarReachable": true,
+  "runtime": "python-stdlib"
+}
 ```
-
-## API command
-
-All Gmail and Calendar operations must use:
-
-```bash
-hermes-google-api
-```
-
-Never invoke the bundled `google_api.py` with plain `python`.
 
 ## Gmail
 
 ```bash
+GAPI="${HERMES_HOME:-$HOME/.hermes}/skills/productivity/google-workspace/scripts/google_api.py"
+
 # Search inbox messages from the last 30 days.
-hermes-google-api gmail search "in:inbox newer_than:30d" --max 100
+/usr/bin/python3 "$GAPI" gmail search "in:inbox newer_than:30d" --max 100
 
 # Search unread messages.
-hermes-google-api gmail search "in:inbox is:unread" --max 50
+/usr/bin/python3 "$GAPI" gmail search "in:inbox is:unread" --max 50
 
 # Read a full message after obtaining its ID from search results.
-hermes-google-api gmail get MESSAGE_ID
+/usr/bin/python3 "$GAPI" gmail get MESSAGE_ID
 
 # List labels.
-hermes-google-api gmail labels
+/usr/bin/python3 "$GAPI" gmail labels
 
 # Send only after explicit user approval.
-hermes-google-api gmail send --to user@example.com --subject "Subject" --body "Body"
+/usr/bin/python3 "$GAPI" gmail send --to user@example.com --subject "Subject" --body "Body"
 
 # Reply only after explicit user approval.
-hermes-google-api gmail reply MESSAGE_ID --body "Body"
+/usr/bin/python3 "$GAPI" gmail reply MESSAGE_ID --body "Body"
 ```
 
 ### Inbox-summary procedure
@@ -85,29 +101,30 @@ hermes-google-api gmail reply MESSAGE_ID --body "Body"
 For requests such as “review my Gmail inbox and summarize messages in the last
 30 days”:
 
-1. Run the health check.
-2. Search with `in:inbox newer_than:30d` and a reasonable maximum, normally
-   `--max 100`.
-3. Use the returned sender, subject, date, and snippet to group routine mail.
-4. Fetch full message bodies with `gmail get` for messages that appear important,
+1. Run the standard-library health check above.
+2. Search with `in:inbox newer_than:30d` and `--max 100`.
+3. Use sender, subject, date, labels, and snippet to group routine mail.
+4. Fetch full bodies with `gmail get` for messages that appear important,
    ambiguous, action-required, financial, travel-related, security-related, or
    time-sensitive.
-5. Summarize by priority and topic. Clearly state the number of messages
-   reviewed and whether the search reached its maximum result limit.
+5. Summarize by priority and topic. Clearly state how many messages were
+   reviewed and whether 100 results were returned.
 6. Do not mark messages read, modify labels, reply, send, archive, or delete
    unless the user explicitly requests that action.
 
 ## Calendar
 
 ```bash
+GAPI="${HERMES_HOME:-$HOME/.hermes}/skills/productivity/google-workspace/scripts/google_api.py"
+
 # Upcoming events.
-hermes-google-api calendar list
+/usr/bin/python3 "$GAPI" calendar list
 
 # Explicit date range.
-hermes-google-api calendar list --start 2026-07-15T00:00:00+08:00 --end 2026-07-16T00:00:00+08:00
+/usr/bin/python3 "$GAPI" calendar list --start 2026-07-15T00:00:00+08:00 --end 2026-07-16T00:00:00+08:00
 
 # Create only after explicit user approval.
-hermes-google-api calendar create --summary "Meeting" --start 2026-07-15T10:00:00+08:00 --end 2026-07-15T10:30:00+08:00
+/usr/bin/python3 "$GAPI" calendar create --summary "Meeting" --start 2026-07-15T10:00:00+08:00 --end 2026-07-15T10:30:00+08:00
 ```
 
 Do not create, update, delete, or invite attendees without explicit user
@@ -115,13 +132,16 @@ approval. Use Asia/Singapore when the user does not provide another timezone.
 
 ## Operator-managed setup
 
-OAuth setup, repair, checking, and revocation are performed from GitHub Actions:
+Setup and recovery are performed from GitHub Actions:
 
-- **Google Workspace OAuth → provision-client**
-- **Google Workspace OAuth → send-auth-link**
-- **Google Workspace OAuth → exchange-callback**
-- **Google Workspace OAuth → check**
-- **Google Workspace OAuth → revoke**
+- **Google Workspace Runtime Repair** installs this skill and its dependency-free
+  API script at the exact paths above and performs live Gmail/Calendar checks.
+- **Google Workspace OAuth → provision-client** installs the Desktop client.
+- **Google Workspace OAuth → send-auth-link** sends the consent link.
+- **Google Workspace OAuth → exchange-callback** stores the token.
+- **Google Workspace OAuth → check** verifies the OAuth helper path.
+- **Google Workspace OAuth → revoke** revokes the token.
 
 The complete browser-only procedure is documented in
-`docs/google-workspace.md` in the deployment repository.
+`GOOGLE_WORKSPACE_SETUP.md` and `docs/google-workspace.md` in the deployment
+repository.

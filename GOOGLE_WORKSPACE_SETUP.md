@@ -8,13 +8,32 @@ Detailed references:
 - [Full browser-only OAuth setup](docs/google-workspace.md)
 - [Telegram and runtime troubleshooting](docs/google-workspace-runtime-troubleshooting.md)
 
+## Runtime design
+
+OAuth setup and normal Gmail/Calendar usage use separate implementations:
+
+- **Google Workspace OAuth** uses the Google authentication libraries only for
+  creating, exchanging, refreshing, checking, and revoking OAuth credentials.
+- **Google Workspace Runtime Repair** installs a separate Gmail/Calendar client
+  written entirely with Python's standard library.
+
+The active runtime client is installed at:
+
+```text
+/home/hermes/.hermes/skills/productivity/google-workspace/scripts/google_api.py
+```
+
+It does not import `googleapiclient`, `google-auth`, or any pip package. Runtime
+requests therefore continue working even when Hermes' private virtual
+environment is replaced or unavailable.
+
 ## Workflows
 
 | Workflow | Purpose |
 |---|---|
 | **Deploy Hermes Agent** | Creates or updates the VM and restarts Hermes. |
-| **Google Workspace Runtime Repair** | Installs the managed Google skill, explicit venv-backed API wrapper, and verifies Gmail access. Runs automatically after every successful deploy. |
-| **Google Workspace OAuth** | Provisions the Desktop OAuth client, sends the authorization link, exchanges the callback, checks access, or revokes the token. |
+| **Google Workspace Runtime Repair** | Overwrites the active Google skill and `google_api.py` with the repository-managed standard-library versions, then performs live Gmail and Calendar checks. Runs automatically after every successful deploy. |
+| **Google Workspace OAuth** | Provisions the Desktop OAuth client, sends the authorization link, exchanges the callback, checks OAuth, or revokes the token. |
 
 ## One-time Google Cloud configuration
 
@@ -56,22 +75,21 @@ exchange.
 Run the workflows in this order:
 
 1. **Deploy Hermes Agent**.
-2. Wait for the automatic **Google Workspace Runtime Repair** run.
-3. **Google Workspace OAuth → `provision-client`**.
-4. **Google Workspace OAuth → `send-auth-link`**.
-5. Open the link delivered privately through Telegram and approve access.
-6. Copy the complete failed loopback URL beginning with
+2. **Google Workspace OAuth → `provision-client`**.
+3. **Google Workspace OAuth → `send-auth-link`**.
+4. Open the link delivered privately through Telegram and approve access.
+5. Copy the complete failed loopback URL beginning with
    `http://127.0.0.1:1/?code=...` from the browser address bar.
-7. Create temporary secret `GOOGLE_OAUTH_CALLBACK_URL` with that complete URL.
-8. **Google Workspace OAuth → `exchange-callback`**.
-9. Delete `GOOGLE_OAUTH_CALLBACK_URL` immediately after success.
-10. **Google Workspace Runtime Repair**.
-11. **Google Workspace OAuth → `check`**.
+6. Create temporary secret `GOOGLE_OAUTH_CALLBACK_URL` with that complete URL.
+7. **Google Workspace OAuth → `exchange-callback`**.
+8. Delete `GOOGLE_OAUTH_CALLBACK_URL` immediately after success.
+9. **Google Workspace Runtime Repair**.
+10. **Google Workspace OAuth → `check`**.
 
-The runtime-repair log should contain:
+The runtime-repair log must contain:
 
 ```text
-AGENT_RUNTIME_READY: managed Google skill and Gmail API command passed.
+AGENT_RUNTIME_READY_STDLIB: active skill client passed Gmail and Calendar without googleapiclient.
 ```
 
 The OAuth check should contain:
@@ -82,7 +100,7 @@ AUTHENTICATED: Gmail and Calendar API checks passed
 
 ## Verify from Telegram
 
-Send:
+Send a new message after runtime repair completes:
 
 ```text
 Review my Gmail inbox and summarize messages in the last 30 days.
@@ -91,18 +109,20 @@ Review my Gmail inbox and summarize messages in the last 30 days.
 Expected behavior:
 
 - Hermes loads the `google-workspace` skill.
-- It runs `hermes-google-workspace check`.
-- It uses `hermes-google-api` for Gmail.
-- It does not load Himalaya or run `himalaya --version`.
-- It does not attempt `pip install` from the conversation.
+- It defines the active script path under
+  `$HERMES_HOME/skills/productivity/google-workspace/scripts/google_api.py`.
+- It runs `/usr/bin/python3 "$GAPI" check`.
+- It searches Gmail with `/usr/bin/python3 "$GAPI" gmail search ...`.
+- It does not check for `googleapiclient`.
+- It does not load Himalaya or attempt `pip install`.
 
-The managed skill instructs Hermes to search:
+The managed skill searches:
 
 ```text
 in:inbox newer_than:30d
 ```
 
-and to fetch full bodies for important or ambiguous messages before producing a
+and fetches full bodies for important or ambiguous messages before producing a
 priority- and topic-based summary.
 
 ## After any redeploy
@@ -110,8 +130,10 @@ priority- and topic-based summary.
 No OAuth callback is normally required.
 
 1. Let the automatic **Google Workspace Runtime Repair** workflow complete.
-2. Run **Google Workspace OAuth → `check`** when you want an explicit live check.
-3. Retry the Telegram request.
+2. Confirm `AGENT_RUNTIME_READY_STDLIB`.
+3. Retry the Telegram request in a new message.
+4. Run **Google Workspace OAuth → `check`** only when you want an additional
+   OAuth-helper check.
 
 A normal deploy preserves:
 
@@ -120,20 +142,21 @@ A normal deploy preserves:
 /home/hermes/.hermes/google_token.json
 ```
 
-The runtime-repair workflow re-applies the managed skill and wrappers because a
-Hermes update can replace bundled skill instructions or its Python environment.
+Runtime repair deliberately overwrites the active skill instructions and
+`google_api.py`, because a Hermes update may reseed bundled skill files.
 
 ## Repair sequence
 
-When Telegram mentions missing Python libraries or Himalaya:
+When Telegram mentions missing Google Python libraries, a missing command, or
+Himalaya:
 
 1. Run **Google Workspace Runtime Repair** manually.
-2. Confirm `AGENT_RUNTIME_READY`.
-3. Run **Google Workspace OAuth → `check`**.
-4. Retry the request in a new Telegram message.
+2. Confirm `AGENT_RUNTIME_READY_STDLIB`.
+3. Send the Gmail request as a new Telegram message.
 
-When runtime repair says the token is missing, repeat only the authorization
-steps: `send-auth-link`, temporary callback secret, and `exchange-callback`.
+When runtime repair reports that the token is absent, repeat only the OAuth
+authorization steps: `send-auth-link`, temporary callback secret, and
+`exchange-callback`, then rerun runtime repair.
 
 Do not configure a Gmail App Password or Himalaya unless you intentionally want
 a second, separate email integration.
