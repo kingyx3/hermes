@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Dependency-free Google Drive, Docs, and Sheets CLI for Hermes.
 
-All operations are restricted to direct children of one app-owned Drive folder
-named "hermes". The CLI uses only Python's standard library.
+Previously restricted to direct children of one app-owned Drive folder named
+"hermes", the client now supports every descendant while validating the full
+parent chain back to that managed root. The CLI uses only Python's standard
+library.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -28,6 +31,8 @@ DOC_MIME = "application/vnd.google-apps.document"
 SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 MANAGED_KEY = "hermesWorkspace"
 MANAGED_VALUE = "v1"
+MAX_ANCESTRY_DEPTH = 100
+FILE_FIELDS = "id,name,mimeType,parents,trashed,webViewLink,appProperties,modifiedTime,size"
 
 
 def fail(message: str, *, details: Any | None = None) -> "NoReturn":
@@ -206,7 +211,7 @@ def output(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2))
 
 
-def drive_file(file_id: str, *, fields: str = "id,name,mimeType,parents,trashed,webViewLink,appProperties") -> dict[str, Any]:
+def drive_file(file_id: str, *, fields: str = FILE_FIELDS) -> dict[str, Any]:
     encoded = urllib.parse.quote(file_id, safe="")
     result = api_request(
         "GET",
@@ -256,7 +261,7 @@ def find_managed_folder() -> dict[str, Any] | None:
             "q": q,
             "spaces": "drive",
             "pageSize": 10,
-            "fields": "files(id,name,mimeType,parents,trashed,webViewLink,appProperties)",
+            "fields": f"files({FILE_FIELDS})",
         },
     )
     files = result.get("files") or []
@@ -282,7 +287,7 @@ def ensure_workspace() -> dict[str, Any]:
         folder = api_request(
             "POST",
             f"{DRIVE_API}/files",
-            query={"fields": "id,name,mimeType,parents,trashed,webViewLink,appProperties"},
+            query={"fields": FILE_FIELDS},
             body={
                 "name": FOLDER_NAME,
                 "mimeType": FOLDER_MIME,
@@ -294,16 +299,72 @@ def ensure_workspace() -> dict[str, Any]:
     return folder
 
 
-def managed_file(file_id: str, *, expected_mime: str | None = None) -> dict[str, Any]:
-    folder = ensure_workspace()
-    item = drive_file(file_id)
+def single_parent_id(item: dict[str, Any]) -> str:
+    parents = [str(value) for value in (item.get("parents") or []) if value]
+    if len(parents) != 1:
+        fail(
+            "Managed Drive items must have exactly one parent",
+            details={"fileId": item.get("id"), "parents": parents},
+        )
+    return parents[0]
+
+
+def managed_lineage(
+    file_id: str,
+    *,
+    item: dict[str, Any] | None = None,
+    root: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    root = root or ensure_workspace()
+    root_id = str(root["id"])
+    if file_id == root_id:
+        return [root]
+
+    current = item or drive_file(file_id)
+    lineage = [current]
+    seen = {str(current.get("id") or file_id)}
+
+    for _ in range(MAX_ANCESTRY_DEPTH):
+        if current.get("trashed"):
+            fail("File or ancestor folder is trashed", details={"fileId": current.get("id")})
+        parent_id = single_parent_id(current)
+        if parent_id == root_id:
+            lineage.append(root)
+            return lineage
+        if parent_id in seen:
+            fail("Drive folder ancestry contains a cycle", details={"fileId": file_id})
+        seen.add(parent_id)
+        parent = drive_file(parent_id)
+        if parent.get("mimeType") != FOLDER_MIME:
+            fail(
+                "Drive ancestry contains a non-folder parent",
+                details={"fileId": file_id, "parentId": parent_id},
+            )
+        lineage.append(parent)
+        current = parent
+
+    fail(
+        "Drive folder ancestry is too deep",
+        details={"fileId": file_id, "maxDepth": MAX_ANCESTRY_DEPTH},
+    )
+
+
+def managed_file(
+    file_id: str,
+    *,
+    expected_mime: str | None = None,
+    allow_root: bool = False,
+) -> dict[str, Any]:
+    root = ensure_workspace()
+    if file_id == str(root["id"]):
+        if not allow_root:
+            fail("Refusing to modify the managed hermes root folder")
+        item = root
+    else:
+        item = drive_file(file_id)
+        managed_lineage(file_id, item=item, root=root)
     if item.get("trashed"):
         fail("File is trashed")
-    if folder["id"] not in (item.get("parents") or []):
-        fail(
-            "Refusing to operate outside the managed hermes folder",
-            details={"fileId": file_id, "managedFolderId": folder["id"]},
-        )
     if expected_mime and item.get("mimeType") != expected_mime:
         fail(
             "File has the wrong Google Workspace type",
@@ -312,20 +373,55 @@ def managed_file(file_id: str, *, expected_mime: str | None = None) -> dict[str,
     return item
 
 
-def create_managed_file(name: str, mime_type: str) -> dict[str, Any]:
-    folder = ensure_workspace()
+def managed_folder(folder_id: str | None) -> dict[str, Any]:
+    root = ensure_workspace()
+    if not folder_id or folder_id == str(root["id"]):
+        return root
+    return managed_file(folder_id, expected_mime=FOLDER_MIME)
+
+
+def create_managed_file(
+    name: str,
+    mime_type: str,
+    *,
+    parent_id: str | None = None,
+) -> dict[str, Any]:
+    parent = managed_folder(parent_id)
     result = api_request(
         "POST",
         f"{DRIVE_API}/files",
-        query={"fields": "id,name,mimeType,parents,webViewLink,appProperties"},
+        query={"fields": FILE_FIELDS},
         body={
             "name": name,
             "mimeType": mime_type,
-            "parents": [folder["id"]],
+            "parents": [parent["id"]],
             "appProperties": {MANAGED_KEY: MANAGED_VALUE},
         },
     )
     return managed_file(str(result["id"]), expected_mime=mime_type)
+
+
+def list_children(parent_id: str, *, max_results: int = 100) -> list[dict[str, Any]]:
+    limit = max(1, min(int(max_results), 1000))
+    files: list[dict[str, Any]] = []
+    page_token: str | None = None
+    while len(files) < limit:
+        query: dict[str, Any] = {
+            "q": f"'{parent_id}' in parents and trashed=false",
+            "spaces": "drive",
+            "orderBy": "folder,name",
+            "pageSize": min(1000, limit - len(files)),
+            "fields": f"nextPageToken,files({FILE_FIELDS})",
+        }
+        if page_token:
+            query["pageToken"] = page_token
+        result = api_request("GET", f"{DRIVE_API}/files", query=query)
+        batch = result.get("files") or []
+        files.extend(batch)
+        page_token = result.get("nextPageToken")
+        if not page_token or not batch:
+            break
+    return files[:limit]
 
 
 def workspace_ensure(_: argparse.Namespace) -> None:
@@ -334,44 +430,57 @@ def workspace_ensure(_: argparse.Namespace) -> None:
 
 def workspace_status(_: argparse.Namespace) -> None:
     folder = ensure_workspace()
-    result = api_request(
-        "GET",
-        f"{DRIVE_API}/files",
-        query={
-            "q": f"'{folder['id']}' in parents and trashed=false",
-            "spaces": "drive",
-            "pageSize": 1,
-            "fields": "files(id),incompleteSearch",
-        },
-    )
+    children = list_children(str(folder["id"]), max_results=1)
     output(
         {
             "ready": True,
             "folder": folder,
-            "boundary": "direct-children-only",
-            "driveReachable": isinstance(result.get("files"), list),
+            "boundary": "managed-descendants-only",
+            "driveReachable": isinstance(children, list),
         }
     )
 
 
 def drive_list(args: argparse.Namespace) -> None:
-    folder = ensure_workspace()
-    result = api_request(
-        "GET",
-        f"{DRIVE_API}/files",
-        query={
-            "q": f"'{folder['id']}' in parents and trashed=false",
-            "spaces": "drive",
-            "orderBy": "modifiedTime desc",
-            "pageSize": max(1, min(int(args.max_results), 1000)),
-            "fields": "files(id,name,mimeType,modifiedTime,size,webViewLink,parents,appProperties)",
-        },
-    )
-    output(result.get("files") or [])
+    parent = managed_folder(args.parent_id)
+    output(list_children(str(parent["id"]), max_results=args.max_results))
+
+
+def drive_tree(args: argparse.Namespace) -> None:
+    root = ensure_workspace()
+    limit = max(1, min(int(args.max_results), 1000))
+    queue: deque[tuple[str, str]] = deque([(str(root["id"]), FOLDER_NAME)])
+    items: list[dict[str, Any]] = []
+    seen_folders = {str(root["id"])}
+
+    while queue and len(items) < limit:
+        parent_id, parent_path = queue.popleft()
+        for child in list_children(parent_id, max_results=limit - len(items)):
+            child_id = str(child.get("id") or "")
+            child_path = f"{parent_path}/{child.get('name') or child_id}"
+            enriched = dict(child)
+            enriched["path"] = child_path
+            items.append(enriched)
+            if child.get("mimeType") == FOLDER_MIME and child_id:
+                if child_id in seen_folders:
+                    fail("Drive folder tree contains a cycle", details={"folderId": child_id})
+                seen_folders.add(child_id)
+                queue.append((child_id, child_path))
+            if len(items) >= limit:
+                break
+
+    output({"root": root, "items": items, "truncated": bool(queue)})
 
 
 def drive_get(args: argparse.Namespace) -> None:
-    output(managed_file(args.file_id))
+    item = managed_file(args.file_id)
+    lineage = managed_lineage(args.file_id, item=item)
+    names = [str(entry.get("name") or entry.get("id")) for entry in reversed(lineage)]
+    output({"file": item, "path": "/".join(names)})
+
+
+def drive_mkdir(args: argparse.Namespace) -> None:
+    output(create_managed_file(args.name, FOLDER_MIME, parent_id=args.parent_id))
 
 
 def drive_rename(args: argparse.Namespace) -> None:
@@ -380,10 +489,41 @@ def drive_rename(args: argparse.Namespace) -> None:
     result = api_request(
         "PATCH",
         f"{DRIVE_API}/files/{encoded}",
-        query={"fields": "id,name,mimeType,parents,webViewLink,appProperties"},
+        query={"fields": FILE_FIELDS},
         body={"name": args.name},
     )
     output(result)
+
+
+def drive_move(args: argparse.Namespace) -> None:
+    item = managed_file(args.file_id)
+    target = managed_folder(args.parent_id)
+    target_lineage = managed_lineage(str(target["id"]), item=target)
+    if item.get("mimeType") == FOLDER_MIME and str(item["id"]) in {
+        str(entry.get("id")) for entry in target_lineage
+    }:
+        fail(
+            "Refusing to move a folder into itself or one of its descendants",
+            details={"folderId": item["id"], "targetParentId": target["id"]},
+        )
+
+    old_parent = single_parent_id(item)
+    if old_parent == str(target["id"]):
+        output(item)
+        return
+
+    encoded = urllib.parse.quote(args.file_id, safe="")
+    result = api_request(
+        "PATCH",
+        f"{DRIVE_API}/files/{encoded}",
+        query={
+            "addParents": str(target["id"]),
+            "removeParents": old_parent,
+            "fields": FILE_FIELDS,
+        },
+        body={},
+    )
+    output(managed_file(str(result["id"])))
 
 
 def drive_trash(args: argparse.Namespace) -> None:
@@ -424,7 +564,7 @@ def document_text(document: dict[str, Any]) -> str:
 
 
 def docs_create(args: argparse.Namespace) -> None:
-    item = create_managed_file(args.title, DOC_MIME)
+    item = create_managed_file(args.title, DOC_MIME, parent_id=args.parent_id)
     if args.text:
         encoded = urllib.parse.quote(str(item["id"]), safe="")
         api_request(
@@ -476,7 +616,7 @@ def parse_values(value: str) -> list[list[Any]]:
 
 
 def sheets_create(args: argparse.Namespace) -> None:
-    item = create_managed_file(args.title, SHEET_MIME)
+    item = create_managed_file(args.title, SHEET_MIME, parent_id=args.parent_id)
     if args.values_json:
         values = parse_values(args.values_json)
         encoded_id = urllib.parse.quote(str(item["id"]), safe="")
@@ -544,15 +684,27 @@ def parser() -> argparse.ArgumentParser:
     drive = services.add_parser("drive")
     drive_cmds = drive.add_subparsers(dest="drive_command", required=True)
     list_cmd = drive_cmds.add_parser("list")
+    list_cmd.add_argument("--parent-id")
     list_cmd.add_argument("--max", dest="max_results", type=int, default=100)
     list_cmd.set_defaults(handler=drive_list)
+    tree_cmd = drive_cmds.add_parser("tree")
+    tree_cmd.add_argument("--max", dest="max_results", type=int, default=500)
+    tree_cmd.set_defaults(handler=drive_tree)
     get_cmd = drive_cmds.add_parser("get")
     get_cmd.add_argument("file_id")
     get_cmd.set_defaults(handler=drive_get)
+    mkdir_cmd = drive_cmds.add_parser("mkdir")
+    mkdir_cmd.add_argument("--name", required=True)
+    mkdir_cmd.add_argument("--parent-id")
+    mkdir_cmd.set_defaults(handler=drive_mkdir)
     rename_cmd = drive_cmds.add_parser("rename")
     rename_cmd.add_argument("file_id")
     rename_cmd.add_argument("--name", required=True)
     rename_cmd.set_defaults(handler=drive_rename)
+    move_cmd = drive_cmds.add_parser("move")
+    move_cmd.add_argument("file_id")
+    move_cmd.add_argument("--parent-id", required=True)
+    move_cmd.set_defaults(handler=drive_move)
     trash_cmd = drive_cmds.add_parser("trash")
     trash_cmd.add_argument("file_id")
     trash_cmd.set_defaults(handler=drive_trash)
@@ -562,6 +714,7 @@ def parser() -> argparse.ArgumentParser:
     create_doc = docs_cmds.add_parser("create")
     create_doc.add_argument("--title", required=True)
     create_doc.add_argument("--text", default="")
+    create_doc.add_argument("--parent-id")
     create_doc.set_defaults(handler=docs_create)
     get_doc = docs_cmds.add_parser("get")
     get_doc.add_argument("file_id")
@@ -577,6 +730,7 @@ def parser() -> argparse.ArgumentParser:
     create_sheet.add_argument("--title", required=True)
     create_sheet.add_argument("--range", default="Sheet1!A1")
     create_sheet.add_argument("--values-json")
+    create_sheet.add_argument("--parent-id")
     create_sheet.set_defaults(handler=sheets_create)
     get_sheet = sheets_cmds.add_parser("get")
     get_sheet.add_argument("file_id")
