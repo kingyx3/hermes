@@ -99,7 +99,7 @@ jobs:
             sleep 5
           done
 
-          ${SSH} 'rm -rf /tmp/hermes-google-runtime && mkdir -p -m 0700 /tmp/hermes-google-runtime/google-workspace-skill'
+          ${SSH} 'sudo rm -rf /tmp/hermes-google-runtime && install -d -m 0700 /tmp/hermes-google-runtime/google-workspace-skill'
           ${SCP} scripts/google-workspace-oauth.py \
                  scripts/google-workspace-api.py \
                  scripts/google-drive-oauth.py \
@@ -170,7 +170,7 @@ jobs:
           # shellcheck disable=SC1090
           source "${{ steps.ssh.outputs.env_file }}"
           SSH="ssh -i ${SSH_KEY} -p ${SSH_PORT} ${SSH_OPTS} ${SSH_USER}@localhost"
-          ${SSH} 'rm -rf /tmp/hermes-google-runtime' || true
+          ${SSH} 'sudo rm -rf /tmp/hermes-google-runtime' || true
 
       - name: Tear down ephemeral SSH
         if: always()
