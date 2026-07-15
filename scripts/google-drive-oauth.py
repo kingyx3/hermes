@@ -25,11 +25,9 @@ REVOKE_URI = "https://oauth2.googleapis.com/revoke"
 DRIVE_API = "https://www.googleapis.com/drive/v3"
 
 
-def fail(message: str, *, details: Any | None = None) -> "NoReturn":
-    if details is None:
-        print(f"ERROR: {message}", file=os.sys.stderr)
-    else:
-        print(f"ERROR: {message}: {json.dumps(details, ensure_ascii=False)}", file=os.sys.stderr)
+def fail(message: str, details: Any | None = None) -> "NoReturn":
+    suffix = f": {json.dumps(details, ensure_ascii=False)}" if details is not None else ""
+    print(f"ERROR: {message}{suffix}", file=os.sys.stderr)
     raise SystemExit(1)
 
 
@@ -37,10 +35,10 @@ def config_dir() -> Path:
     explicit = os.environ.get("HERMES_CONFIG_DIR")
     if explicit:
         return Path(explicit).expanduser().resolve()
-    hermes_home = os.environ.get("HERMES_HOME")
-    if hermes_home:
-        candidate = Path(hermes_home).expanduser().resolve()
-        return candidate if candidate.name == ".hermes" else candidate / ".hermes"
+    home = os.environ.get("HERMES_HOME")
+    if home:
+        path = Path(home).expanduser().resolve()
+        return path if path.name == ".hermes" else path / ".hermes"
     return Path.home() / ".hermes"
 
 
@@ -65,35 +63,32 @@ def read_json(path: Path) -> dict[str, Any]:
 def write_private_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.chmod(0o700)
-    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary_path = Path(temporary_name)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, sort_keys=True)
             handle.write("\n")
-        temporary_path.chmod(0o600)
-        os.replace(temporary_path, path)
+        temporary.chmod(0o600)
+        os.replace(temporary, path)
         path.chmod(0o600)
     finally:
-        temporary_path.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
 
 
 def client() -> dict[str, str]:
-    payload = read_json(CLIENT_PATH)
-    installed = payload.get("installed")
+    installed = read_json(CLIENT_PATH).get("installed")
     if not isinstance(installed, dict):
         fail("OAuth credentials must be a Google Desktop app client")
     client_id = installed.get("client_id")
     client_secret = installed.get("client_secret")
-    auth_uri = installed.get("auth_uri") or AUTH_URI
-    token_uri = installed.get("token_uri") or TOKEN_URI
     if not client_id or not client_secret:
         fail("OAuth Desktop client is missing client_id or client_secret")
     return {
         "client_id": str(client_id),
         "client_secret": str(client_secret),
-        "auth_uri": str(auth_uri),
-        "token_uri": str(token_uri),
+        "auth_uri": str(installed.get("auth_uri") or AUTH_URI),
+        "token_uri": str(installed.get("token_uri") or TOKEN_URI),
     }
 
 
@@ -101,18 +96,36 @@ def b64url(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
 
 
+def post_form(url: str, values: dict[str, str]) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        data=urllib.parse.urlencode(values).encode("ascii"),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read()
+            return json.loads(raw.decode("utf-8")) if raw else {}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            details = json.loads(raw)
+        except json.JSONDecodeError:
+            details = raw
+        fail(f"OAuth request failed with HTTP {exc.code}", details)
+    except (OSError, json.JSONDecodeError) as exc:
+        fail(f"OAuth request failed: {exc}")
+
+
 def auth_url() -> None:
     cfg = client()
     verifier = b64url(secrets.token_bytes(48))
-    challenge = b64url(hashlib.sha256(verifier.encode("ascii")).digest())
     state = b64url(secrets.token_bytes(24))
+    challenge = b64url(hashlib.sha256(verifier.encode("ascii")).digest())
     write_private_json(
         PENDING_PATH,
-        {
-            "state": state,
-            "code_verifier": verifier,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        },
+        {"state": state, "code_verifier": verifier, "created_at": datetime.now(timezone.utc).isoformat()},
     )
     query = urllib.parse.urlencode(
         {
@@ -122,7 +135,6 @@ def auth_url() -> None:
             "scope": SCOPE,
             "access_type": "offline",
             "prompt": "consent",
-            "include_granted_scopes": "true",
             "code_challenge": challenge,
             "code_challenge_method": "S256",
             "state": state,
@@ -137,38 +149,15 @@ def parse_callback(value: str) -> tuple[str, str | None, list[str] | None]:
         fail("empty OAuth callback")
     if not value.startswith(("http://", "https://")):
         return value, None, None
-    parsed = urllib.parse.urlparse(value)
-    params = urllib.parse.parse_qs(parsed.query)
-    error = (params.get("error") or [None])[0]
-    if error:
-        fail(f"Google returned OAuth error: {error}")
+    params = urllib.parse.parse_qs(urllib.parse.urlparse(value).query)
+    if (params.get("error") or [None])[0]:
+        fail(f"Google returned OAuth error: {(params.get('error') or [''])[0]}")
     code = (params.get("code") or [None])[0]
     if not code:
         fail("OAuth callback URL has no code parameter")
     state = (params.get("state") or [None])[0]
     scopes = ((params.get("scope") or [""])[0]).split() or None
-    return code, state, scopes
-
-
-def post_form(url: str, values: dict[str, str]) -> dict[str, Any]:
-    request = urllib.request.Request(
-        url,
-        data=urllib.parse.urlencode(values).encode("ascii"),
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
-        try:
-            details = json.loads(raw)
-        except json.JSONDecodeError:
-            details = raw
-        fail(f"OAuth request failed with HTTP {exc.code}", details=details)
-    except (OSError, json.JSONDecodeError) as exc:
-        fail(f"OAuth request failed: {exc}")
+    return str(code), state, scopes
 
 
 def exchange_callback(callback: str) -> None:
@@ -188,27 +177,27 @@ def exchange_callback(callback: str) -> None:
             "redirect_uri": REDIRECT_URI,
         },
     )
-    access_token = result.get("access_token")
-    refresh_token = result.get("refresh_token")
-    if not access_token or not refresh_token:
-        fail("Drive OAuth exchange did not return access and refresh tokens", details=result)
-    actual_scopes = str(result.get("scope") or " ".join(returned_scopes or [SCOPE])).split()
-    if SCOPE not in actual_scopes:
-        fail("Google did not grant the required drive.file scope", details={"scopes": actual_scopes})
-    payload = {
-        "type": "authorized_user",
-        "client_id": cfg["client_id"],
-        "client_secret": cfg["client_secret"],
-        "refresh_token": refresh_token,
-        "token": access_token,
-        "token_uri": cfg["token_uri"],
-        "scopes": actual_scopes,
-        "expiry": (
-            datetime.now(timezone.utc)
-            + timedelta(seconds=int(result.get("expires_in") or 3600))
-        ).isoformat(),
-    }
-    write_private_json(TOKEN_PATH, payload)
+    if not result.get("access_token") or not result.get("refresh_token"):
+        fail("Drive OAuth exchange did not return access and refresh tokens", result)
+    scopes = str(result.get("scope") or " ".join(returned_scopes or [SCOPE])).split()
+    if SCOPE not in scopes:
+        fail("Google did not grant the required drive.file scope", {"scopes": scopes})
+    write_private_json(
+        TOKEN_PATH,
+        {
+            "type": "authorized_user",
+            "client_id": cfg["client_id"],
+            "client_secret": cfg["client_secret"],
+            "refresh_token": result["refresh_token"],
+            "token": result["access_token"],
+            "token_uri": cfg["token_uri"],
+            "scopes": scopes,
+            "expiry": (
+                datetime.now(timezone.utc)
+                + timedelta(seconds=int(result.get("expires_in") or 3600))
+            ).isoformat(),
+        },
+    )
     PENDING_PATH.unlink(missing_ok=True)
     print("DRIVE_AUTHENTICATED")
 
@@ -225,11 +214,10 @@ def refresh(payload: dict[str, Any]) -> dict[str, Any]:
     )
     token = result.get("access_token")
     if not token:
-        fail("Drive token refresh returned no access_token", details=result)
+        fail("Drive token refresh returned no access_token", result)
     payload["token"] = token
     payload["expiry"] = (
-        datetime.now(timezone.utc)
-        + timedelta(seconds=int(result.get("expires_in") or 3600))
+        datetime.now(timezone.utc) + timedelta(seconds=int(result.get("expires_in") or 3600))
     ).isoformat()
     write_private_json(TOKEN_PATH, payload)
     return payload
@@ -239,61 +227,33 @@ def check() -> None:
     payload = refresh(read_json(TOKEN_PATH))
     request = urllib.request.Request(
         f"{DRIVE_API}/about?fields=user",
-        headers={
-            "Authorization": f"Bearer {payload['token']}",
-            "Accept": "application/json",
-        },
+        headers={"Authorization": f"Bearer {payload['token']}", "Accept": "application/json"},
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             about = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
-        fail(f"Drive live check failed with HTTP {exc.code}", details=raw)
+        fail(f"Drive live check failed with HTTP {exc.code}", exc.read().decode("utf-8", errors="replace"))
     except (OSError, json.JSONDecodeError) as exc:
         fail(f"Drive live check failed: {exc}")
-    print(
-        json.dumps(
-            {
-                "authenticated": True,
-                "scope": SCOPE,
-                "user": about.get("user"),
-            },
-            ensure_ascii=False,
-        )
-    )
+    print(json.dumps({"authenticated": True, "scope": SCOPE, "user": about.get("user")}, ensure_ascii=False))
 
 
 def revoke() -> None:
-    if not TOKEN_PATH.exists():
-        PENDING_PATH.unlink(missing_ok=True)
-        print("DRIVE_NOT_AUTHENTICATED")
-        return
-    payload = read_json(TOKEN_PATH)
-    token = payload.get("refresh_token") or payload.get("token")
-    if token:
-        try:
-            post_form(REVOKE_URI, {"token": str(token)})
-        except SystemExit:
-            print("WARNING: remote revocation failed", file=os.sys.stderr)
+    if TOKEN_PATH.exists():
+        token = read_json(TOKEN_PATH).get("refresh_token")
+        if token:
+            try:
+                post_form(REVOKE_URI, {"token": str(token)})
+            except SystemExit:
+                print("WARNING: remote revocation failed", file=os.sys.stderr)
     TOKEN_PATH.unlink(missing_ok=True)
     PENDING_PATH.unlink(missing_ok=True)
     print("DRIVE_REVOKED")
 
 
 def paths() -> None:
-    print(
-        json.dumps(
-            {
-                "client": str(CLIENT_PATH),
-                "token": str(TOKEN_PATH),
-                "pending": str(PENDING_PATH),
-                "scope": SCOPE,
-                "redirect_uri": REDIRECT_URI,
-            },
-            indent=2,
-        )
-    )
+    print(json.dumps({"client": str(CLIENT_PATH), "token": str(TOKEN_PATH), "pending": str(PENDING_PATH), "scope": SCOPE, "redirect_uri": REDIRECT_URI}, indent=2))
 
 
 def parser() -> argparse.ArgumentParser:
