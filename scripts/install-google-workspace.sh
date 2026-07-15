@@ -27,6 +27,17 @@ TARGET_CLIENT="${HERMES_CONFIG_DIR}/google_client_secret.json"
 TARGET_SKILL_DIR="${HERMES_CONFIG_DIR}/skills/productivity/google-workspace"
 TARGET_SKILL_SCRIPTS_DIR="${TARGET_SKILL_DIR}/scripts"
 
+validate_python_source() {
+  /usr/bin/python3 - "$1" <<'PY'
+import ast
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+PY
+}
+
 install -d -o root -g root -m 0755 "${TARGET_LIB_DIR}"
 install -o root -g root -m 0755 "${SCRIPT_DIR}/google-workspace-oauth.py" "${TARGET_HELPER}"
 install -o root -g root -m 0755 "${SCRIPT_DIR}/hermes-google-workspace.sh" "${TARGET_OAUTH_WRAPPER}"
@@ -37,7 +48,7 @@ if [ -f "${SCRIPT_DIR}/hermes-google-drive.sh" ]; then
   install -o root -g root -m 0755 "${SCRIPT_DIR}/hermes-google-drive.sh" "${TARGET_DRIVE_WRAPPER}"
 fi
 if [ -f "${DRIVE_OAUTH_SOURCE}" ]; then
-  /usr/bin/python3 -m py_compile "${DRIVE_OAUTH_SOURCE}"
+  validate_python_source "${DRIVE_OAUTH_SOURCE}"
   install -o root -g root -m 0755 "${DRIVE_OAUTH_SOURCE}" "${TARGET_DRIVE_OAUTH}"
 fi
 
@@ -52,11 +63,11 @@ fi
 install -d -o "${HERMES_USER}" -g "${HERMES_GROUP}" -m 0700 "${HERMES_CONFIG_DIR}"
 
 if [ -f "${API_SOURCE}" ]; then
-  /usr/bin/python3 -m py_compile "${API_SOURCE}"
+  validate_python_source "${API_SOURCE}"
   install -o root -g root -m 0755 "${API_SOURCE}" "${TARGET_API}"
 fi
 if [ -f "${DRIVE_SOURCE}" ]; then
-  /usr/bin/python3 -m py_compile "${DRIVE_SOURCE}"
+  validate_python_source "${DRIVE_SOURCE}"
   install -o root -g root -m 0755 "${DRIVE_SOURCE}" "${TARGET_DRIVE}"
 fi
 
