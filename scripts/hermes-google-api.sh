@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Run Hermes' bundled Google Workspace API CLI with Hermes' own Python venv.
-# This avoids relying on login-shell PATH resolution for `python`.
+# Run the repository-managed dependency-free Google Workspace API client.
 set -euo pipefail
 
 USER_HOME="${HERMES_USER_HOME:-${HOME:-/home/hermes}}"
@@ -12,26 +11,23 @@ else
   CONFIG_DIR="${HERMES_HOME:-${USER_HOME}}/.hermes"
 fi
 
-GOOGLE_API_SCRIPT="${HERMES_GOOGLE_API_SCRIPT:-${CONFIG_DIR}/skills/productivity/google-workspace/scripts/google_api.py}"
-PYTHON_BIN=""
-for candidate in \
-  "${CONFIG_DIR}/hermes-agent/venv/bin/python" \
-  "${CONFIG_DIR}/hermes-agent/.venv/bin/python"; do
-  if [ -x "${candidate}" ]; then
-    PYTHON_BIN="${candidate}"
-    break
-  fi
-done
-
-if [ -z "${PYTHON_BIN}" ]; then
-  echo "Hermes Python venv not found under ${CONFIG_DIR}/hermes-agent." >&2
-  echo "Run Deploy Hermes Agent, then Google Workspace OAuth → check." >&2
-  exit 1
+GOOGLE_API_SCRIPT="${HERMES_GOOGLE_API_SCRIPT:-/usr/local/lib/hermes/google-workspace-api.py}"
+if [ ! -f "${GOOGLE_API_SCRIPT}" ]; then
+  GOOGLE_API_SCRIPT="${CONFIG_DIR}/skills/productivity/google-workspace/scripts/google_api.py"
 fi
 
 if [ ! -f "${GOOGLE_API_SCRIPT}" ]; then
-  echo "Hermes Google Workspace API script not found: ${GOOGLE_API_SCRIPT}" >&2
-  echo "Run Deploy Hermes Agent to restore the bundled skill." >&2
+  echo "Managed Google Workspace API script not found." >&2
+  echo "Run the Google Workspace Runtime Repair workflow." >&2
+  exit 1
+fi
+
+PYTHON_BIN="${HERMES_GOOGLE_PYTHON:-/usr/bin/python3}"
+if [ ! -x "${PYTHON_BIN}" ]; then
+  PYTHON_BIN="$(command -v python3 || true)"
+fi
+if [ -z "${PYTHON_BIN}" ] || [ ! -x "${PYTHON_BIN}" ]; then
+  echo "python3 is required for the dependency-free Google Workspace client." >&2
   exit 1
 fi
 
