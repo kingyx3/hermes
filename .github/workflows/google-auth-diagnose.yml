@@ -1,0 +1,270 @@
+name: Diagnose Google OAuth
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_oauth_project_id:
+        description: "Optional project ID whose OAuth app is known to be in production"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hermes-infra
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Resolve configuration
+        id: cfg
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_ID="${{ vars.GCP_PROJECT_ID }}"
+          if [ -z "${PROJECT_ID}" ]; then
+            PROJECT_ID="$(jq -r '.project_id' "${GOOGLE_APPLICATION_CREDENTIALS}")"
+          fi
+          [ -n "${PROJECT_ID}" ] && [ "${PROJECT_ID}" != "null" ] || {
+            echo "Could not resolve GCP project ID" >&2
+            exit 1
+          }
+
+          PROJECT_NUMBER="$(
+            gcloud projects describe "${PROJECT_ID}" \
+              --format='value(projectNumber)'
+          )"
+
+          ZONE="${{ vars.GCP_ZONE }}"
+          ZONE="${ZONE:-us-central1-a}"
+
+          VM_NAME="${{ vars.GCP_VM_NAME }}"
+          VM_NAME="${VM_NAME:-hermes-agent}"
+
+          HERMES_USER="${{ vars.HERMES_USER }}"
+          HERMES_USER="${HERMES_USER:-hermes}"
+
+          HERMES_OS_HOME="${{ vars.HERMES_HOME }}"
+          HERMES_OS_HOME="${HERMES_OS_HOME:-/home/hermes}"
+
+          {
+            echo "project_id=${PROJECT_ID}"
+            echo "project_number=${PROJECT_NUMBER}"
+            echo "zone=${ZONE}"
+            echo "vm_name=${VM_NAME}"
+            echo "hermes_user=${HERMES_USER}"
+            echo "hermes_config_dir=${HERMES_OS_HOME}/.hermes"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Establish ephemeral SSH over IAP
+        id: ssh
+        env:
+          VM_NAME: ${{ steps.cfg.outputs.vm_name }}
+          ZONE: ${{ steps.cfg.outputs.zone }}
+          PROJECT_ID: ${{ steps.cfg.outputs.project_id }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/*.sh
+          ENV_FILE="$(scripts/ssh-iap.sh up)"
+          echo "env_file=${ENV_FILE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Inspect OAuth alignment safely
+        env:
+          HERMES_USER: ${{ steps.cfg.outputs.hermes_user }}
+          HERMES_CONFIG_DIR: ${{ steps.cfg.outputs.hermes_config_dir }}
+          DEPLOY_PROJECT_ID: ${{ steps.cfg.outputs.project_id }}
+          DEPLOY_PROJECT_NUMBER: ${{ steps.cfg.outputs.project_number }}
+          EXPECTED_OAUTH_PROJECT_ID: ${{ inputs.expected_oauth_project_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # shellcheck disable=SC1090
+          source "${{ steps.ssh.outputs.env_file }}"
+
+          SSH=(
+            ssh
+            -i "${SSH_KEY}"
+            -p "${SSH_PORT}"
+            ${SSH_OPTS}
+            "${SSH_USER}@localhost"
+          )
+
+          for i in $(seq 1 30); do
+            if "${SSH[@]}" true 2>/dev/null; then
+              break
+            fi
+            if [ "${i}" = "30" ]; then
+              echo "VM SSH not ready" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+
+          shell_quote() {
+            printf '%q' "$1"
+          }
+
+          REMOTE_COMMAND="sudo -u $(shell_quote "${HERMES_USER}") env \
+          HERMES_HOME=$(shell_quote "${HERMES_CONFIG_DIR}") \
+          DEPLOY_PROJECT_ID=$(shell_quote "${DEPLOY_PROJECT_ID}") \
+          DEPLOY_PROJECT_NUMBER=$(shell_quote "${DEPLOY_PROJECT_NUMBER}") \
+          EXPECTED_OAUTH_PROJECT_ID=$(shell_quote "${EXPECTED_OAUTH_PROJECT_ID}") \
+          python3 -"
+
+          "${SSH[@]}" "${REMOTE_COMMAND}" <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          home = Path(os.environ["HERMES_HOME"])
+          token_path = home / "google_token.json"
+          secret_path = home / "google_client_secret.json"
+
+          print("=== File presence ===")
+          print(f"token_file_present:                 {token_path.exists()}")
+          print(f"client_secret_present:              {secret_path.exists()}")
+
+          if not token_path.exists() or not secret_path.exists():
+              raise SystemExit("Required Google OAuth files are missing")
+
+          token = json.loads(token_path.read_text(encoding="utf-8"))
+          secret_document = json.loads(secret_path.read_text(encoding="utf-8"))
+          client_type = "installed" if secret_document.get("installed") else "web"
+          oauth_client = secret_document.get(client_type) or {}
+
+          token_client_id = token.get("client_id")
+          configured_client_id = oauth_client.get("client_id")
+          oauth_project_id = oauth_client.get("project_id")
+          deploy_project_id = os.environ["DEPLOY_PROJECT_ID"]
+          deploy_project_number = os.environ["DEPLOY_PROJECT_NUMBER"]
+          expected_project_id = os.environ.get("EXPECTED_OAUTH_PROJECT_ID", "").strip()
+
+          configured_project_number = None
+          if configured_client_id:
+              prefix = configured_client_id.split("-", 1)[0]
+              if prefix.isdigit():
+                  configured_project_number = prefix
+
+          modified = datetime.fromtimestamp(
+              token_path.stat().st_mtime,
+              tz=timezone.utc,
+          ).isoformat()
+
+          scopes = token.get("scopes") or token.get("scope") or []
+          if isinstance(scopes, str):
+              scopes = scopes.split()
+
+          print()
+          print("=== OAuth identity ===")
+          print(f"oauth_client_type:                  {client_type}")
+          print(f"token_client_id:                    {token_client_id}")
+          print(f"configured_client_id:               {configured_client_id}")
+          print(f"oauth_project_id:                   {oauth_project_id}")
+          print(f"configured_client_project_number:   {configured_project_number}")
+          print(f"deploy_project_id:                  {deploy_project_id}")
+          print(f"deploy_project_number:              {deploy_project_number}")
+          print(f"expected_oauth_project_id:          {expected_project_id or '(not supplied)'}")
+
+          print()
+          print("=== Alignment ===")
+          print(
+              "token_matches_client_secret:          "
+              f"{token_client_id == configured_client_id}"
+          )
+          print(
+              "oauth_project_matches_deploy_project: "
+              f"{oauth_project_id == deploy_project_id}"
+          )
+          print(
+              "client_number_matches_deploy_number:  "
+              f"{configured_project_number == deploy_project_number}"
+          )
+          if expected_project_id:
+              print(
+                  "oauth_project_matches_expected:       "
+                  f"{oauth_project_id == expected_project_id}"
+              )
+
+          print()
+          print("=== Token health metadata ===")
+          print(f"refresh_token_present:              {bool(token.get('refresh_token'))}")
+          print(f"access_token_expiry:                {token.get('expiry')}")
+          print(f"token_file_modified_utc:            {modified}")
+          print(f"stored_scope_count:                 {len(scopes)}")
+          print(
+              "stored_refresh_token_expires_in:       "
+              f"{token.get('refresh_token_expires_in')}"
+          )
+
+          print()
+          print("=== Interpretation ===")
+          if token_client_id != configured_client_id:
+              print("FAIL: The stored token and client-secret file use different OAuth clients.")
+          elif expected_project_id and oauth_project_id != expected_project_id:
+              print("FAIL: Hermes is not using the OAuth project supplied as the expected production project.")
+          else:
+              print("PASS: Stored token and client-secret OAuth client IDs are aligned.")
+
+          if oauth_project_id != deploy_project_id:
+              print("NOTE: OAuth and infrastructure use different GCP projects. This can be intentional.")
+              print("      Publishing status must be checked for oauth_project_id, not deploy_project_id.")
+
+          print("NOTE: Google does not expose OAuth publishing status through token metadata.")
+          PY
+
+      - name: Test refresh and a live Google API call
+        env:
+          HERMES_USER: ${{ steps.cfg.outputs.hermes_user }}
+          HERMES_CONFIG_DIR: ${{ steps.cfg.outputs.hermes_config_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # shellcheck disable=SC1090
+          source "${{ steps.ssh.outputs.env_file }}"
+
+          SSH=(
+            ssh
+            -i "${SSH_KEY}"
+            -p "${SSH_PORT}"
+            ${SSH_OPTS}
+            "${SSH_USER}@localhost"
+          )
+
+          shell_quote() {
+            printf '%q' "$1"
+          }
+
+          SETUP="${HERMES_CONFIG_DIR}/skills/productivity/google-workspace/scripts/setup.py"
+          REMOTE_COMMAND="sudo -u $(shell_quote "${HERMES_USER}") env \
+          HERMES_HOME=$(shell_quote "${HERMES_CONFIG_DIR}") \
+          bash -lc 'if python3 $(shell_quote "${SETUP}") --help 2>&1 | grep -q -- --check-live; then python3 $(shell_quote "${SETUP}") --check-live; else python3 $(shell_quote "${SETUP}") --check; fi'"
+
+          "${SSH[@]}" "${REMOTE_COMMAND}"
+
+      - name: Tear down ephemeral SSH
+        if: always()
+        env:
+          VM_NAME: ${{ steps.cfg.outputs.vm_name }}
+          ZONE: ${{ steps.cfg.outputs.zone }}
+          PROJECT_ID: ${{ steps.cfg.outputs.project_id }}
+        run: scripts/ssh-iap.sh down || true
