@@ -61,8 +61,8 @@ jobs:
           HERMES_USER="${{ vars.HERMES_USER }}"
           HERMES_USER="${HERMES_USER:-hermes}"
 
-          HERMES_OS_HOME="${{ vars.HERMES_HOME }}"
-          HERMES_OS_HOME="${HERMES_OS_HOME:-/home/hermes}"
+          HERMES_USER_HOME="${{ vars.HERMES_HOME }}"
+          HERMES_USER_HOME="${HERMES_USER_HOME:-/home/hermes}"
 
           {
             echo "project_id=${PROJECT_ID}"
@@ -70,7 +70,8 @@ jobs:
             echo "zone=${ZONE}"
             echo "vm_name=${VM_NAME}"
             echo "hermes_user=${HERMES_USER}"
-            echo "hermes_config_dir=${HERMES_OS_HOME}/.hermes"
+            echo "hermes_user_home=${HERMES_USER_HOME}"
+            echo "hermes_config_dir=${HERMES_USER_HOME}/.hermes"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Establish ephemeral SSH over IAP
@@ -88,6 +89,7 @@ jobs:
       - name: Inspect OAuth alignment safely
         env:
           HERMES_USER: ${{ steps.cfg.outputs.hermes_user }}
+          HERMES_USER_HOME: ${{ steps.cfg.outputs.hermes_user_home }}
           HERMES_CONFIG_DIR: ${{ steps.cfg.outputs.hermes_config_dir }}
           DEPLOY_PROJECT_ID: ${{ steps.cfg.outputs.project_id }}
           DEPLOY_PROJECT_NUMBER: ${{ steps.cfg.outputs.project_number }}
@@ -122,38 +124,40 @@ jobs:
             printf '%q' "$1"
           }
 
-          REMOTE_COMMAND="sudo -u $(shell_quote "${HERMES_USER}") env \
+          REMOTE_INSPECT="sudo -u $(shell_quote "${HERMES_USER}") env \
+          HOME=$(shell_quote "${HERMES_USER_HOME}") \
           HERMES_HOME=$(shell_quote "${HERMES_CONFIG_DIR}") \
+          HERMES_CONFIG_DIR=$(shell_quote "${HERMES_CONFIG_DIR}") \
           DEPLOY_PROJECT_ID=$(shell_quote "${DEPLOY_PROJECT_ID}") \
           DEPLOY_PROJECT_NUMBER=$(shell_quote "${DEPLOY_PROJECT_NUMBER}") \
           EXPECTED_OAUTH_PROJECT_ID=$(shell_quote "${EXPECTED_OAUTH_PROJECT_ID}") \
-          python3 -"
+          /usr/bin/python3 -"
 
-          "${SSH[@]}" "${REMOTE_COMMAND}" <<'PY'
+          "${SSH[@]}" "${REMOTE_INSPECT}" <<'PY'
           import json
           import os
           from datetime import datetime, timezone
           from pathlib import Path
 
-          home = Path(os.environ["HERMES_HOME"])
-          token_path = home / "google_token.json"
-          secret_path = home / "google_client_secret.json"
+          config_dir = Path(os.environ["HERMES_CONFIG_DIR"])
+          token_path = config_dir / "google_token.json"
+          client_path = config_dir / "google_client_secret.json"
 
           print("=== File presence ===")
           print(f"token_file_present:                 {token_path.exists()}")
-          print(f"client_secret_present:              {secret_path.exists()}")
+          print(f"client_secret_present:              {client_path.exists()}")
 
-          if not token_path.exists() or not secret_path.exists():
+          if not token_path.exists() or not client_path.exists():
               raise SystemExit("Required Google OAuth files are missing")
 
           token = json.loads(token_path.read_text(encoding="utf-8"))
-          secret_document = json.loads(secret_path.read_text(encoding="utf-8"))
-          client_type = "installed" if secret_document.get("installed") else "web"
-          oauth_client = secret_document.get(client_type) or {}
+          client_document = json.loads(client_path.read_text(encoding="utf-8"))
+          client_type = "installed" if client_document.get("installed") else "web"
+          configured_client = client_document.get(client_type) or {}
 
           token_client_id = token.get("client_id")
-          configured_client_id = oauth_client.get("client_id")
-          oauth_project_id = oauth_client.get("project_id")
+          configured_client_id = configured_client.get("client_id")
+          oauth_project_id = configured_client.get("project_id")
           deploy_project_id = os.environ["DEPLOY_PROJECT_ID"]
           deploy_project_number = os.environ["DEPLOY_PROJECT_NUMBER"]
           expected_project_id = os.environ.get("EXPECTED_OAUTH_PROJECT_ID", "").strip()
@@ -164,14 +168,14 @@ jobs:
               if prefix.isdigit():
                   configured_project_number = prefix
 
+          scopes = token.get("scopes") or token.get("scope") or []
+          if isinstance(scopes, str):
+              scopes = scopes.split()
+
           modified = datetime.fromtimestamp(
               token_path.stat().st_mtime,
               tz=timezone.utc,
           ).isoformat()
-
-          scopes = token.get("scopes") or token.get("scope") or []
-          if isinstance(scopes, str):
-              scopes = scopes.split()
 
           print()
           print("=== OAuth identity ===")
@@ -220,7 +224,7 @@ jobs:
           if token_client_id != configured_client_id:
               print("FAIL: The stored token and client-secret file use different OAuth clients.")
           elif expected_project_id and oauth_project_id != expected_project_id:
-              print("FAIL: Hermes is not using the OAuth project supplied as the expected production project.")
+              print("FAIL: Hermes is not using the expected production OAuth project.")
           else:
               print("PASS: Stored token and client-secret OAuth client IDs are aligned.")
 
@@ -231,9 +235,10 @@ jobs:
           print("NOTE: Google does not expose OAuth publishing status through token metadata.")
           PY
 
-      - name: Test refresh and a live Google API call
+      - name: Test refresh and live Gmail and Calendar calls
         env:
           HERMES_USER: ${{ steps.cfg.outputs.hermes_user }}
+          HERMES_USER_HOME: ${{ steps.cfg.outputs.hermes_user_home }}
           HERMES_CONFIG_DIR: ${{ steps.cfg.outputs.hermes_config_dir }}
         shell: bash
         run: |
@@ -254,12 +259,14 @@ jobs:
             printf '%q' "$1"
           }
 
-          SETUP="${HERMES_CONFIG_DIR}/skills/productivity/google-workspace/scripts/setup.py"
-          REMOTE_COMMAND="sudo -u $(shell_quote "${HERMES_USER}") env \
+          REMOTE_CHECK="sudo -u $(shell_quote "${HERMES_USER}") env \
+          HOME=$(shell_quote "${HERMES_USER_HOME}") \
+          HERMES_USER_HOME=$(shell_quote "${HERMES_USER_HOME}") \
           HERMES_HOME=$(shell_quote "${HERMES_CONFIG_DIR}") \
-          bash -lc 'if python3 $(shell_quote "${SETUP}") --help 2>&1 | grep -q -- --check-live; then python3 $(shell_quote "${SETUP}") --check-live; else python3 $(shell_quote "${SETUP}") --check; fi'"
+          HERMES_CONFIG_DIR=$(shell_quote "${HERMES_CONFIG_DIR}") \
+          /usr/local/bin/hermes-google-workspace check"
 
-          "${SSH[@]}" "${REMOTE_COMMAND}"
+          "${SSH[@]}" "${REMOTE_CHECK}"
 
       - name: Tear down ephemeral SSH
         if: always()
