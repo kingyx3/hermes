@@ -1,13 +1,16 @@
 name: PR Validation
 
-# Validates Terraform and scripts on pull requests. Never applies infra and
-# never uses secrets, so it is safe for untrusted forks.
+# Validates Terraform, scripts, and repository-managed runtime clients on PRs.
+# Never applies infrastructure and never uses secrets.
 on:
   pull_request:
     paths:
       - "terraform/**"
       - "scripts/**"
+      - "skills/**"
+      - "tests/**"
       - ".github/workflows/**"
+      - ".github/dependabot.yml"
 
 permissions:
   contents: read
@@ -32,7 +35,6 @@ jobs:
         working-directory: terraform
         run: |
           set -euo pipefail
-          # No backend/credentials on PRs — validate config syntax/consistency only.
           terraform init -backend=false
           terraform validate
 
@@ -48,3 +50,10 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends shellcheck
           shellcheck scripts/*.sh
+
+      - name: Python syntax and camera/security unit tests
+        run: |
+          set -euo pipefail
+          python3 -m py_compile scripts/*.py
+          python3 -m unittest discover -s tests -p 'test_camera*.py'
+          python3 -m unittest discover -s tests -p 'test_sanitize_wireguard.py'
