@@ -1,0 +1,192 @@
+name: Home Camera Runtime
+
+# Installs/repairs the secure WireGuard + go2rtc + Hermes camera integration.
+# Runs after a successful Hermes deploy and can also be triggered manually.
+on:
+  workflow_run:
+    workflows:
+      - Deploy Hermes Agent
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hermes-infra
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect camera configuration
+        id: camera
+        env:
+          HOME_WIREGUARD_CONFIG: ${{ secrets.HOME_WIREGUARD_CONFIG }}
+        run: |
+          set -euo pipefail
+          if [ -n "${HOME_WIREGUARD_CONFIG}" ]; then
+            echo "enabled=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "enabled=false" >> "${GITHUB_OUTPUT}"
+            echo "HOME_WIREGUARD_CONFIG is not set; secure home-camera runtime is skipped."
+          fi
+
+      - name: Authenticate to GCP
+        if: steps.camera.outputs.enabled == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud
+        if: steps.camera.outputs.enabled == 'true'
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Resolve configuration
+        if: steps.camera.outputs.enabled == 'true'
+        id: cfg
+        run: |
+          set -euo pipefail
+          PROJECT_ID="${{ vars.GCP_PROJECT_ID }}"
+          if [ -z "${PROJECT_ID}" ]; then
+            PROJECT_ID="$(jq -r '.project_id' "${GOOGLE_APPLICATION_CREDENTIALS}")"
+          fi
+          [ -n "${PROJECT_ID}" ] && [ "${PROJECT_ID}" != "null" ] || { echo "Could not resolve project_id" >&2; exit 1; }
+          ZONE="${{ vars.GCP_ZONE }}"; ZONE="${ZONE:-us-central1-a}"
+          VM_NAME="${{ vars.GCP_VM_NAME }}"; VM_NAME="${VM_NAME:-hermes-agent}"
+          HERMES_USER="${{ vars.HERMES_USER }}"; HERMES_USER="${HERMES_USER:-hermes}"
+          HERMES_HOME="${{ vars.HERMES_HOME }}"; HERMES_HOME="${HERMES_HOME:-/home/hermes}"
+          XIAOMI_REGION="${{ vars.XIAOMI_REGION }}"; XIAOMI_REGION="${XIAOMI_REGION:-sg}"
+          {
+            echo "project_id=${PROJECT_ID}"
+            echo "zone=${ZONE}"
+            echo "vm_name=${VM_NAME}"
+            echo "hermes_user=${HERMES_USER}"
+            echo "hermes_home=${HERMES_HOME}"
+            echo "hermes_config_dir=${HERMES_HOME}/.hermes"
+            echo "xiaomi_region=${XIAOMI_REGION}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Ensure outbound IPv4 egress for WireGuard
+        if: steps.camera.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          IP="$(gcloud compute instances describe '${{ steps.cfg.outputs.vm_name }}' \
+            --zone='${{ steps.cfg.outputs.zone }}' \
+            --project='${{ steps.cfg.outputs.project_id }}' \
+            --format='value(networkInterfaces[0].accessConfigs[0].natIP)' 2>/dev/null || true)"
+          if [ -z "${IP}" ]; then
+            gcloud compute instances add-access-config '${{ steps.cfg.outputs.vm_name }}' \
+              --zone='${{ steps.cfg.outputs.zone }}' \
+              --project='${{ steps.cfg.outputs.project_id }}' \
+              --network-interface=nic0 \
+              --network-tier=STANDARD
+          fi
+          echo "Camera runtime uses an ephemeral external IPv4 for outbound-only VPN/cloud access; GCP firewall ingress remains IAP SSH only."
+
+      - name: Render WireGuard secret file
+        if: steps.camera.outputs.enabled == 'true'
+        id: secret
+        env:
+          HOME_WIREGUARD_CONFIG: ${{ secrets.HOME_WIREGUARD_CONFIG }}
+        run: |
+          set -euo pipefail
+          umask 077
+          WG_FILE="${RUNNER_TEMP}/home-wireguard.conf"
+          printf '%s\n' "${HOME_WIREGUARD_CONFIG}" > "${WG_FILE}"
+          chmod 0600 "${WG_FILE}"
+          echo "path=${WG_FILE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Establish ephemeral SSH over IAP
+        if: steps.camera.outputs.enabled == 'true'
+        id: ssh
+        env:
+          VM_NAME: ${{ steps.cfg.outputs.vm_name }}
+          ZONE: ${{ steps.cfg.outputs.zone }}
+          PROJECT_ID: ${{ steps.cfg.outputs.project_id }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/*.sh
+          ENV_FILE="$(scripts/ssh-iap.sh up)"
+          echo "env_file=${ENV_FILE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install and verify camera runtime
+        if: steps.camera.outputs.enabled == 'true'
+        env:
+          HERMES_USER: ${{ steps.cfg.outputs.hermes_user }}
+          HERMES_HOME: ${{ steps.cfg.outputs.hermes_home }}
+          HERMES_CONFIG_DIR: ${{ steps.cfg.outputs.hermes_config_dir }}
+          XIAOMI_REGION: ${{ steps.cfg.outputs.xiaomi_region }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1090
+          source "${{ steps.ssh.outputs.env_file }}"
+          SSH="ssh -i ${SSH_KEY} -p ${SSH_PORT} ${SSH_OPTS} ${SSH_USER}@localhost"
+          SCP="scp -i ${SSH_KEY} -P ${SSH_PORT} ${SSH_OPTS}"
+
+          for i in $(seq 1 30); do
+            if ${SSH} true 2>/dev/null; then break; fi
+            [ "${i}" = "30" ] && { echo "VM SSH not ready"; exit 1; }
+            sleep 5
+          done
+
+          ${SSH} 'sudo rm -rf /tmp/hermes-camera-runtime && install -d -m 0700 /tmp/hermes-camera-runtime /tmp/hermes-camera-runtime/skill'
+          ${SCP} scripts/install-camera-runtime.sh \
+                 scripts/sanitize_wireguard.py \
+                 scripts/camera_refresh.py \
+                 scripts/camera_api.py \
+                 "${SSH_USER}@localhost:/tmp/hermes-camera-runtime/"
+          ${SCP} skills/cameras/SKILL.md \
+                 "${SSH_USER}@localhost:/tmp/hermes-camera-runtime/skill/SKILL.md"
+          ${SCP} "${{ steps.secret.outputs.path }}" \
+                 "${SSH_USER}@localhost:/tmp/hermes-camera-runtime/home.conf"
+
+          ${SSH} "sudo env \
+            HERMES_USER='${HERMES_USER}' \
+            HERMES_HOME='${HERMES_HOME}' \
+            HERMES_CONFIG_DIR='${HERMES_CONFIG_DIR}' \
+            XIAOMI_REGION='${XIAOMI_REGION}' \
+            WIREGUARD_CONFIG_SOURCE='/tmp/hermes-camera-runtime/home.conf' \
+            SANITIZER_SOURCE='/tmp/hermes-camera-runtime/sanitize_wireguard.py' \
+            CAMERA_API_SOURCE='/tmp/hermes-camera-runtime/camera_api.py' \
+            CAMERA_REFRESH_SOURCE='/tmp/hermes-camera-runtime/camera_refresh.py' \
+            CAMERA_SKILL_SOURCE='/tmp/hermes-camera-runtime/skill/SKILL.md' \
+            bash /tmp/hermes-camera-runtime/install-camera-runtime.sh"
+
+          ACTIVE_API="${HERMES_CONFIG_DIR}/skills/home/cameras/scripts/camera_api.py"
+          ${SSH} "sudo -u '${HERMES_USER}' test -x '${ACTIVE_API}'"
+          ${SSH} "sudo systemctl is-active --quiet wg-quick@home.service"
+          ${SSH} "sudo systemctl is-active --quiet go2rtc.service"
+          ${SSH} "sudo systemctl is-enabled --quiet hermes-camera-refresh.timer"
+          ${SSH} "sudo systemctl is-enabled --quiet hermes-camera-auth.path"
+          ${SSH} "sudo -u '${HERMES_USER}' env HOME='${HERMES_HOME}' HERMES_HOME='${HERMES_CONFIG_DIR}' /usr/bin/python3 '${ACTIVE_API}' check" \
+            || echo "Camera bridge is installed; Xiaomi one-time authorization may still be required."
+
+          echo "Camera bridge ready. For one-time Xiaomi authorization, open an IAP local-forward to 127.0.0.1:1984 as documented in docs/cameras.md."
+
+      - name: Remove temporary VM files
+        if: always() && steps.camera.outputs.enabled == 'true' && steps.ssh.outcome == 'success'
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1090
+          source "${{ steps.ssh.outputs.env_file }}"
+          SSH="ssh -i ${SSH_KEY} -p ${SSH_PORT} ${SSH_OPTS} ${SSH_USER}@localhost"
+          ${SSH} 'sudo rm -rf /tmp/hermes-camera-runtime' || true
+
+      - name: Tear down ephemeral SSH
+        if: always() && steps.camera.outputs.enabled == 'true'
+        env:
+          VM_NAME: ${{ steps.cfg.outputs.vm_name }}
+          ZONE: ${{ steps.cfg.outputs.zone }}
+          PROJECT_ID: ${{ steps.cfg.outputs.project_id }}
+        run: scripts/ssh-iap.sh down || true
+
+      - name: Clean up runner secret file
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/home-wireguard.conf" || true
