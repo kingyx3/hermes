@@ -80,7 +80,7 @@ python3 "${LIB_DIR}/sanitize_wireguard.py" "${WIREGUARD_CONFIG_SOURCE}" "${tmp_w
 install -o root -g root -m 0600 "${tmp_wg}" "${WG_BOOTSTRAP}"
 
 if [ -f "${CAMERA_ETC}/camera-ips.json" ]; then
-  CAMERA_EXPECTED_COUNT="${CAMERA_EXPECTED_COUNT}" python3 "${LIB_DIR}/pin_camera_routes.py" \
+  python3 "${LIB_DIR}/pin_camera_routes.py" \
     --bootstrap "${WG_BOOTSTRAP}" --runtime "${WG_CONFIG}" \
     --inventory "${GO2RTC_STATE}/cameras.json" --pin "${CAMERA_ETC}/camera-ips.json" \
     --changed-marker /run/hermes-camera-routes.changed \
