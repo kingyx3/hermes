@@ -10,6 +10,7 @@ on:
       - "skills/**"
       - "tests/**"
       - ".github/workflows/**"
+      - ".github/dependabot.yml"
 
 permissions:
   contents: read
@@ -50,7 +51,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends shellcheck
           shellcheck scripts/*.sh
 
-      - name: Python syntax and camera unit tests
+      - name: Python syntax and camera/security unit tests
         run: |
           set -euo pipefail
           python3 -m py_compile scripts/*.py

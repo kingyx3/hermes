@@ -1,7 +1,7 @@
 ---
 name: home-cameras
-description: "Read-only access to the configured Xiaomi home cameras through the local go2rtc/WireGuard bridge. Use for current visual checks of the home; never claim historical coverage."
-version: 1.0.0
+description: "Read-only current snapshots from configured Xiaomi home cameras through a constrained Unix-socket broker. Use for current visual checks only; never claim historical coverage or camera-control capability."
+version: 1.1.0
 platforms: [linux]
 metadata:
   hermes:
@@ -13,7 +13,8 @@ metadata:
 Use this skill whenever the user asks what is currently visible at home, asks
 you to check one or more cameras, or asks whether a person/animal/object is
 visible. The integration is deliberately snapshot-only: it does not expose
-camera credentials, RTSP, audio, PTZ, recording, or historical footage.
+camera credentials, raw go2rtc access, RTSP, audio, PTZ, recording, or
+historical footage.
 
 ## Runtime
 
@@ -39,20 +40,21 @@ Only invoke it with `/usr/bin/python3`:
    run `snapshot-all`.
 3. Each successful snapshot result contains a local `path`. Call Hermes'
    `vision_analyze` tool on that exact local image path before describing what
-   is visible. Do not infer visual details from the camera name or command
-   output alone.
-4. Treat each image as a point-in-time observation. Say that you cannot answer
-   historical questions ("what happened earlier", "who came home at 3pm") from
-   this integration because it intentionally does not record video.
-5. Do not use curl, raw go2rtc endpoints, Xiaomi account APIs, WireGuard tools,
-   or camera-control protocols as a substitute for this client.
-6. Never expose or search for Xiaomi tokens, WireGuard private keys, the
-   go2rtc writable configuration, or `/etc/wireguard/home.conf`.
-7. A failed `check` with `setup_required: true` means the operator still needs
-   to complete the one-time Xiaomi authorization documented in `docs/cameras.md`.
+   is visible. Never infer visual details from the camera name or command output.
+4. Treat every image as a point-in-time observation. State that historical
+   questions cannot be answered because this integration intentionally records
+   no video.
+5. Do not use curl, raw Unix sockets, go2rtc endpoints, Xiaomi APIs, WireGuard
+   tools, `/var/lib/go2rtc`, or `/etc/wireguard` as substitutes for this client.
+6. Never attempt to discover, read, reveal, rotate, or modify Xiaomi tokens,
+   WireGuard keys, route pins, or go2rtc configuration.
+7. Never open the temporary Xiaomi authorization service. Enrollment is an
+   operator-only action and is not part of answering a camera request.
+8. If a camera fails, report it as unavailable. Do not interpret failure as an
+   empty room and do not attempt alternate network paths.
 
 ## Multi-camera answers
 
 Analyze each returned image separately, keeping camera names attached to the
-observations, then summarize across cameras. If a snapshot fails for one camera,
-report that camera as unavailable rather than treating it as empty.
+observations, then summarize across cameras. Avoid identifying people by name
+unless the user explicitly provides that identity in the current context.

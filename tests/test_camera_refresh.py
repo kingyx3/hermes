@@ -18,6 +18,7 @@ class CameraRefreshTests(unittest.TestCase):
         streams, cameras = MOD.build_streams(sources)
         self.assertEqual(cameras[0]["name"], "living_room")
         self.assertEqual(cameras[0]["ip"], "192.168.0.201")
+        self.assertEqual(cameras[0]["model"], "chuangmi.camera.061a03")
         self.assertEqual(
             streams["living_room"],
             "xiaomi://12345:sg@192.168.0.201?did=99887766&model=chuangmi.camera.061a03",

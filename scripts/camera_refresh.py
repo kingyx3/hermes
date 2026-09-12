@@ -1,27 +1,57 @@
 #!/usr/bin/env python3
-"""Discover Xiaomi cameras through local go2rtc and render a safe stream map."""
+"""Discover Xiaomi cameras through go2rtc's private Unix API and render safe state."""
 from __future__ import annotations
 
 import argparse
+import http.client
 import ipaddress
 import json
 import os
 import re
-import urllib.error
+import socket
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
-API_BASE = "http://127.0.0.1:1984"
-USER_AGENT = "hermes-camera-refresh/1"
+GO2RTC_SOCKET = os.environ.get("GO2RTC_API_SOCKET", "/run/go2rtc/api.sock")
+USER_AGENT = "hermes-camera-refresh/2"
+
+
+class SetupRequired(RuntimeError):
+    pass
+
+
+PRIVATE_V4 = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+
+
+class UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, socket_path: str, timeout: float):
+        super().__init__("localhost", timeout=timeout)
+        self.socket_path = socket_path
+
+    def connect(self) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        sock.connect(self.socket_path)
+        self.sock = sock
 
 
 def get_json(path: str, timeout: float = 12.0):
-    req = urllib.request.Request(API_BASE + path, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as response:
+    conn = UnixHTTPConnection(GO2RTC_SOCKET, timeout)
+    try:
+        conn.request("GET", path, headers={"User-Agent": USER_AGENT})
+        response = conn.getresponse()
         if response.status != 200:
             raise RuntimeError(f"go2rtc returned HTTP {response.status}")
-        return json.load(response)
+        body = response.read(1024 * 1024 + 1)
+        if len(body) > 1024 * 1024:
+            raise RuntimeError("go2rtc discovery response exceeded safety limit")
+        return json.loads(body)
+    finally:
+        conn.close()
 
 
 def slugify(value: str) -> str:
@@ -40,12 +70,7 @@ def validate_source_url(source_url: str) -> str:
         address = ipaddress.ip_address(parsed.hostname)
     except ValueError as exc:
         raise ValueError("Xiaomi camera source must use an IP address") from exc
-    private_ranges = (
-        ipaddress.ip_network("10.0.0.0/8"),
-        ipaddress.ip_network("172.16.0.0/12"),
-        ipaddress.ip_network("192.168.0.0/16"),
-    )
-    if address.version != 4 or not any(address in network for network in private_ranges):
+    if address.version != 4 or not any(address in network for network in PRIVATE_V4):
         raise ValueError("refusing Xiaomi source whose camera IP is not RFC1918 private")
     return source_url
 
@@ -70,6 +95,7 @@ def build_streams(sources: list[dict]) -> tuple[dict, list[dict]]:
         parsed = urllib.parse.urlsplit(source_url)
         query = urllib.parse.parse_qs(parsed.query)
         did = (query.get("did") or [""])[0]
+        model = (query.get("model") or [""])[0]
         base = slugify(display)
         name = base
         if name in used:
@@ -80,7 +106,13 @@ def build_streams(sources: list[dict]) -> tuple[dict, list[dict]]:
         used.add(name)
 
         streams[name] = source_url
-        cameras.append({"name": name, "display_name": display, "ip": parsed.hostname, "did": did})
+        cameras.append({
+            "name": name,
+            "display_name": display,
+            "ip": parsed.hostname,
+            "did": did,
+            "model": model,
+        })
 
     return streams, cameras
 
@@ -88,7 +120,7 @@ def build_streams(sources: list[dict]) -> tuple[dict, list[dict]]:
 def discover(region: str) -> tuple[dict, list[dict]]:
     users = get_json("/api/xiaomi")
     if not isinstance(users, list) or not users:
-        raise RuntimeError("Xiaomi authorization is not configured in go2rtc")
+        raise SetupRequired("Xiaomi authorization is not configured in go2rtc")
 
     all_sources: list[dict] = []
     for user_id in users:
@@ -96,6 +128,8 @@ def discover(region: str) -> tuple[dict, list[dict]]:
             continue
         query = urllib.parse.urlencode({"id": user_id, "region": region})
         result = get_json("/api/xiaomi?" + query, timeout=20.0)
+        if isinstance(result, dict) and isinstance(result.get("sources"), list):
+            result = result["sources"]
         if isinstance(result, list):
             all_sources.extend(item for item in result if isinstance(item, dict))
 
@@ -105,7 +139,7 @@ def discover(region: str) -> tuple[dict, list[dict]]:
     return streams, cameras
 
 
-def atomic_write_json(path: Path, payload: dict) -> bool:
+def atomic_write_json(path: Path, payload: dict, mode: int = 0o640) -> bool:
     rendered = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     try:
         old = path.read_text(encoding="utf-8")
@@ -115,7 +149,7 @@ def atomic_write_json(path: Path, payload: dict) -> bool:
         return False
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(rendered, encoding="utf-8")
-    os.chmod(tmp, 0o600)
+    os.chmod(tmp, mode)
     os.replace(tmp, path)
     return True
 
@@ -134,14 +168,19 @@ def main() -> int:
         changed_inventory = atomic_write_json(args.inventory, {"cameras": cameras, "region": args.region})
         if changed_streams:
             args.changed_marker.write_text("changed\n", encoding="utf-8")
+            os.chmod(args.changed_marker, 0o600)
         else:
             args.changed_marker.unlink(missing_ok=True)
-        print(json.dumps({"ok": True, "cameras": cameras, "changed": changed_streams or changed_inventory}))
+        print(json.dumps({"ok": True, "camera_count": len(cameras), "changed": changed_streams or changed_inventory}))
         return 0
-    except (OSError, RuntimeError, urllib.error.URLError, json.JSONDecodeError) as exc:
+    except SetupRequired as exc:
         args.changed_marker.unlink(missing_ok=True)
-        print(json.dumps({"ok": False, "error": str(exc)}))
+        print(json.dumps({"ok": True, "setup_required": True, "reason": str(exc)}))
         return 0
+    except (OSError, RuntimeError, json.JSONDecodeError) as exc:
+        args.changed_marker.unlink(missing_ok=True)
+        print(json.dumps({"ok": False, "error": str(exc)[:240]}))
+        return 2
 
 
 if __name__ == "__main__":

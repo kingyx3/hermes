@@ -1,108 +1,140 @@
 # Secure Xiaomi C500 Pro cameras for Hermes
 
-This integration keeps all camera services private. The three Xiaomi cameras
-remain on the home LAN; the TP-Link router terminates WireGuard; the GCP VM runs
-WireGuard, a localhost-only go2rtc bridge, and a read-only Hermes snapshot
-skill. No camera, RTSP, WebRTC, or go2rtc port is opened to the Internet.
+This integration is designed for three Xiaomi home cameras behind a TP-Link
+WireGuard server, with Hermes running on the existing GCP VM. Normal operation
+has **no go2rtc TCP listener**. The security boundary is:
 
-## What is automated by this repository
+```text
+Xiaomi cameras -> TP-Link WireGuard -> go2rtc private Unix socket
+              -> constrained camera broker Unix socket -> Hermes -> vision
+```
 
-After `HOME_WIREGUARD_CONFIG` exists, **Home Camera Runtime** automatically:
+Hermes never receives the Xiaomi token, WireGuard private key, raw go2rtc
+control socket, RTSP/WebRTC access, PTZ control, or continuous video.
 
-- ensures the GCP VM has outbound IPv4 egress (ephemeral Standard-tier address;
-  the existing firewall still permits inbound SSH only from Google IAP),
-- installs `wireguard-tools` and FFmpeg,
-- validates the TP-Link export and rejects default routes, command hooks, and
-  unsupported wg-quick directives,
-- stores the sanitized WireGuard key material only at
-  `/etc/wireguard/home.conf` (`root:root`, `0600`),
-- downloads the pinned go2rtc v1.9.14 Linux binary and verifies GitHub's
-  published SHA-256 digest before installation,
-- runs go2rtc as an unprivileged system user with systemd hardening,
-- binds go2rtc only to `127.0.0.1:1984`, disables RTSP and WebRTC listeners, and
-  initializes only the `api`, `mp4`, and `xiaomi` go2rtc modules and allowlists
-  only the minimal localhost HTTP paths needed for Xiaomi auth, discovery,
-  stream listing, and single-frame MP4 snapshots,
-- discovers Xiaomi cameras after authorization; a Hermes request fetches one
-  H.264/HEVC keyframe and converts that one frame to JPEG with the system
-  FFmpeg binary, so there is no continuous decoding or recording,
-- installs the Hermes `home-cameras` skill and read-only snapshot client.
+## What the repository automates
+
+After the GitHub secret `HOME_WIREGUARD_CONFIG` exists, **Home Camera Runtime**:
+
+- validates and sanitizes the TP-Link WireGuard export; command hooks, public
+  routes, default routes, IPv6 routes, and unsupported wg-quick directives are
+  rejected,
+- keeps the original sanitized TP-Link export root-only at
+  `/etc/wireguard/home.bootstrap.conf` and the active runtime config at
+  `/etc/wireguard/home.conf`, both mode `0600`,
+- installs the pinned go2rtc v1.9.14 binary only after verifying its SHA-256,
+- runs go2rtc as an unprivileged system user with systemd sandboxing, CPU/memory
+  limits, RTSP/WebRTC disabled, and only `api`, `mp4`, and `xiaomi` modules,
+- exposes go2rtc only at `/run/go2rtc/api.sock`; there is no normal TCP port
+  `1984`,
+- runs a second broker as a different system user. Hermes can access only the
+  broker socket at `/run/hermes-camera/camera.sock`; the broker can only list
+  validated cameras, health-check, or return one current snapshot,
+- prevents the Hermes user from reading `/var/lib/go2rtc/go2rtc.yaml` or
+  connecting to the raw go2rtc Unix socket,
+- keeps snapshot conversion inside a memory/CPU-limited broker cgroup and limits
+  frame/image sizes and timeouts,
+- discovers Xiaomi devices through the authenticated Xiaomi cloud API, accepts
+  only RFC1918 camera addresses, and validates camera names before use,
+- after the first successful discovery, requires exactly three unique cameras,
+  pins those IPs in `/etc/hermes-camera/camera-ips.json`, and rewrites WireGuard
+  `AllowedIPs` to three `/32` routes. Later IP drift fails closed until an
+  operator verifies the DHCP reservations and explicitly re-pins,
+- installs a 6-hour refresh timer and a read-only Hermes `home-cameras` skill,
+- adds CI security tests, CodeQL Python analysis, Dependabot for GitHub Actions,
+  and a weekly go2rtc release-watch issue if the pinned version becomes stale.
 
 ## One-time TP-Link setup
 
-On the BE19000-class TP-Link router:
+On the TP-Link BE19000-class router:
 
-1. Reserve a stable DHCP address for each C500 Pro. Keep all three on the normal
-   private home LAN; do not port-forward the cameras.
-2. Go to **Advanced → VPN Server → WireGuard** and enable WireGuard.
-3. Set **Client Access = Home Network Only**. In the account, set **Allowed
-   IPs (Client)** to only your RFC1918 home-LAN subnet(s), for example
-   `192.168.0.0/24`; do not use the default Internet-wide split routes
-   (`0.0.0.0/1,128.0.0.0/1`). The repository rejects every non-RFC1918
-   `AllowedIPs` entry as well as `0.0.0.0/0` / `::/0`.
-4. Keep **Persistent Keepalive** at 25 seconds. The installer also inserts 25 if
-   the export omits it.
-5. Enable TP-Link DDNS (or otherwise provide a stable public endpoint) if the
+1. **Reserve a stable DHCP address for each of the three cameras.** Do not
+   port-forward any camera.
+2. Go to **Advanced -> VPN Server -> WireGuard** and enable WireGuard.
+3. Set **Client Access = Home Network Only**. Do not configure Internet-wide
+   routes such as `0.0.0.0/0` or `0.0.0.0/1,128.0.0.0/1`.
+4. Keep **Persistent Keepalive** at 25 seconds if the router exposes the option.
+5. Enable TP-Link DDNS, or otherwise provide a stable public endpoint, if your
    WAN address changes.
-6. Create one dedicated WireGuard account named, for example, `hermes-gcp`.
-   Enable the account's pre-shared key if the router offers it.
-7. Export that account's WireGuard configuration file. Use the account only for
-   Hermes; TP-Link documents that one account should not be connected from
-   multiple clients simultaneously.
+6. Create a **dedicated WireGuard account** named `hermes-gcp` (or similar).
+   Enable a pre-shared key if the router offers one.
+7. Export that account's WireGuard configuration. Use this peer only for Hermes.
 
-### WAN requirement
+The repository permits an RFC1918 subnet route during bootstrap so discovery can
+complete. Immediately after the first verified three-camera discovery it
+replaces that subnet with only the three pinned camera `/32`s.
 
-The router's WAN address must be reachable from the Internet. If the TP-Link WAN
-address is private/CGNAT (commonly `10.0.0.0/8`, `172.16.0.0/12`,
-`192.168.0.0/16`, or `100.64.0.0/10`), ask the ISP for a public IPv4 or this
-router-hosted WireGuard design will not be reachable from GCP.
+### WAN / CGNAT requirement
 
-## One unavoidable credential handoff
+The TP-Link's WAN address must be reachable from the Internet. If the router's
+WAN address is in `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, or
+`100.64.0.0/10`, you are behind an upstream/private NAT. Obtain a public IPv4
+from the ISP (or use a different VPN design) before continuing.
 
-The exported WireGuard file contains the **client private key** generated by the
-TP-Link. The repository cannot derive it from the router and it must never be
-committed. Add the complete exported file as this GitHub Actions secret:
+## Add the WireGuard secret to GitHub
+
+The exported file contains a client private key, so never commit it. Add the
+**entire exported file** as this repository Actions secret:
 
 ```text
 HOME_WIREGUARD_CONFIG
 ```
 
-Path: **Repository Settings → Secrets and variables → Actions → Secrets → New
-repository secret**.
+Path: **Repository Settings -> Secrets and variables -> Actions -> Secrets ->
+New repository secret**.
 
-This is the only GitHub-side secret required for the camera network. It is used
-only by `camera-runtime.yml`, written to a mode-0600 temporary runner file,
-copied over the existing IAP SSH tunnel, sanitized on the VM, then deleted from
-both temporary locations. It is not added to Hermes' environment and is not
-passed through Terraform/state.
+The workflow writes it to a mode-0600 runner temp file, copies it over IAP,
+sanitizes it on the VM, and deletes temporary copies. It never enters Terraform
+state or the Hermes environment.
 
-## Deploy
+For this setup the expected camera count defaults to `3`. Only set the optional
+repository variable `CAMERA_EXPECTED_COUNT` if the intended number changes.
 
-Merge the camera PR or push it to `main`, then let **Deploy Hermes Agent** finish.
-**Home Camera Runtime** runs automatically afterward. You can also run it
-manually from Actions.
+## Deploy and verify the network boundary
 
-A healthy runtime has:
+Merge the camera PR, let **Deploy Hermes Agent** finish, then let **Home Camera
+Runtime** finish. The camera workflow verifies all of these automatically:
 
 ```text
-wg-quick@home.service       active
-go2rtc.service              active
-hermes-camera-refresh.timer enabled
-hermes-camera-auth.path     enabled
+wg-quick@home.service          active
+go2rtc.service                 active
+hermes-camera-proxy.service    active
+hermes-camera-refresh.timer    enabled
+/run/go2rtc/api.sock           mode 660
+TCP 127.0.0.1:1984            NOT listening in normal operation
+Hermes -> raw go2rtc socket    denied
+Hermes -> Xiaomi token file    denied
 ```
 
-The workflow fails if the TP-Link peer never completes a WireGuard handshake;
-that catches incorrect DDNS, CGNAT, expired exports, and routing problems before
-camera credentials are configured.
+The workflow fails if WireGuard never completes a handshake.
 
 ## One-time Xiaomi authorization
 
-Xiaomi requires an interactive login (and may require CAPTCHA/SMS/email
-verification) to mint the account token. Do **not** put the Xiaomi password in
-GitHub, Telegram, Hermes memory, or a shell history. Authorize directly through
-an IAP local port-forward to go2rtc's localhost-only UI.
+Xiaomi must mint an account token interactively and may require CAPTCHA,
+email/SMS verification, or 2FA. Do not put the Xiaomi password or verification
+code in GitHub, Telegram, Hermes, or shell arguments.
 
-From a trusted machine with `gcloud` authenticated to the same GCP project:
+Authorization is deliberately **not available during normal operation**. You
+open a 15-minute localhost-only enrollment window that uses a random one-time
+Basic Auth password; it automatically closes after 15 minutes.
+
+From a trusted computer with `gcloud` access to this GCP project:
+
+### 1. Open the enrollment window
+
+```bash
+gcloud compute ssh hermes-agent \
+  --zone us-central1-a \
+  --tunnel-through-iap \
+  --command 'sudo hermes-camera-auth open'
+```
+
+The command prints a temporary username (`camera-admin`) and random password.
+Do not copy that password into chat or GitHub.
+
+If repository variables change the VM name/zone, use those values instead.
+
+### 2. In a second terminal, create the IAP-only local tunnel
 
 ```bash
 gcloud compute ssh hermes-agent \
@@ -111,50 +143,89 @@ gcloud compute ssh hermes-agent \
   -- -N -L 1984:127.0.0.1:1984
 ```
 
-Adjust VM name/zone only if the repository variables override their defaults.
-While that command is running, open:
+Leave this terminal open temporarily.
+
+### 3. Authorize Xiaomi
+
+Open:
 
 ```text
 http://127.0.0.1:1984/add.html
 ```
 
-Choose **Xiaomi**, log into the Mi Home account, complete Xiaomi verification,
-and select the **Singapore (`sg`)** region. Successful login writes only the
-Xiaomi token into `/var/lib/go2rtc/go2rtc.yaml` (owned by the dedicated go2rtc
-user, mode 0600). The `hermes-camera-auth.path` unit detects the token change,
-discovers the cameras, builds the on-demand snapshot streams, and reloads
-go2rtc automatically.
+Your browser will request the temporary Basic Auth credentials printed in step
+1. Choose **Xiaomi**, sign in to Mi Home, complete Xiaomi verification, and use
+the region that contains your cameras (`sg` by default for this deployment).
 
-If the Mi Home account actually uses another Xiaomi region, set the optional
-repository variable `XIAOMI_REGION` (`cn`, `de`, `i2`, `ru`, `sg`, or `us`) and
-re-run **Home Camera Runtime**.
+The Xiaomi account token is written only to `/var/lib/go2rtc/go2rtc.yaml`, owned
+by `go2rtc`, mode `0600`.
 
-## Using Hermes
+### 4. Close the enrollment window immediately
 
-The camera skill supports only current snapshots, for example:
+```bash
+gcloud compute ssh hermes-agent \
+  --zone us-central1-a \
+  --tunnel-through-iap \
+  --command 'sudo hermes-camera-auth close'
+```
 
-- "Check all my cameras."
-- "Is anyone at the entrance?"
-- "Where is the dog?"
-- "What can you see in the living room?"
+Closing the window restores the private Unix-socket runtime, discovers the
+cameras, verifies there are exactly three, pins their IPs, converts WireGuard to
+three `/32` routes, and restarts the constrained broker. The auto-close timer is
+only a fallback; close it manually as soon as authorization succeeds.
 
-Hermes first obtains a single video keyframe, converts it to a fresh local JPEG,
-then calls its vision tool on the local file. Snapshot files live under
-`~/.hermes/cache/cameras`, mode 0600, and are excluded from repository sync.
+If the Mi Home account uses another region, set repository variable
+`XIAOMI_REGION` to the correct go2rtc Xiaomi region (`cn`, `de`, `i2`, `ru`,
+`sg`, or `us`), re-run **Home Camera Runtime**, then repeat authorization.
 
-This implementation intentionally cannot answer historical questions such as
-"what happened while I was away?" because it does not run Frigate or continuous
-recording on the e2-micro VM.
+## Verify production state
 
-## Security / rotation
+After authorization, this command should show three `/32` routes rather than a
+whole home subnet:
 
-- **WireGuard compromise:** delete/recreate the dedicated TP-Link WireGuard
-  account, replace `HOME_WIREGUARD_CONFIG`, and re-run Home Camera Runtime.
-- **Xiaomi token compromise:** remove `/var/lib/go2rtc/go2rtc.yaml` on the VM,
-  restart go2rtc, and repeat the IAP-only Xiaomi authorization. Do not expose the
-  go2rtc UI publicly for recovery.
-- **No public camera ports:** do not add GCP firewall rules for 1984, 8554, 8555,
-  or any camera LAN address. The external VM IPv4 exists for outbound WireGuard
-  and Xiaomi/GitHub/package egress only.
-- **TP-Link key renewal:** exporting a new client configuration is required when
-  the router/server key or account key is renewed.
+```bash
+gcloud compute ssh hermes-agent \
+  --zone us-central1-a \
+  --tunnel-through-iap \
+  --command "sudo grep '^AllowedIPs' /etc/wireguard/home.conf"
+```
+
+Ask Hermes:
+
+```text
+Check all my cameras.
+```
+
+Hermes should list the camera names, capture one JPEG per camera through the
+broker, and use `vision_analyze` on those local files.
+
+## IP drift / DHCP changes
+
+The first successful inventory is pinned intentionally. If a camera later gets
+a different IP, automatic refresh **fails closed** rather than changing VPN
+routes. First fix/verify the TP-Link DHCP reservations. Only after confirming
+that the newly discovered IPs really belong to your three cameras, run:
+
+```bash
+gcloud compute ssh hermes-agent \
+  --zone us-central1-a \
+  --tunnel-through-iap \
+  --command 'sudo hermes-camera-auth repin'
+```
+
+Do not use `repin` as a routine recovery step without checking the router first.
+
+## Rotation and incident response
+
+- **WireGuard key suspected compromised:** delete/recreate only the dedicated
+  `hermes-gcp` peer, update `HOME_WIREGUARD_CONFIG`, and re-run Home Camera
+  Runtime.
+- **Xiaomi token suspected compromised:** remove/revoke the token state and run
+  the short enrollment flow again. Never expose go2rtc publicly for recovery.
+- **Camera IP changes unexpectedly:** treat it as a network/configuration event;
+  verify TP-Link DHCP reservations before `repin`.
+- **go2rtc release available:** the weekly dependency watch opens one issue for
+  review. Do not blindly update the binary/digest; review upstream changes and
+  let CI/CodeQL pass first.
+- **No historical recording:** this deployment intentionally captures only
+  requested point-in-time frames. It cannot answer what happened hours earlier.

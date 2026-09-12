@@ -1,7 +1,6 @@
 name: Home Camera Runtime
 
-# Installs/repairs the secure WireGuard + go2rtc + Hermes camera integration.
-# Runs after a successful Hermes deploy and can also be triggered manually.
+# Installs/repairs the secure WireGuard + go2rtc + constrained Hermes camera path.
 on:
   workflow_run:
     workflows:
@@ -63,6 +62,7 @@ jobs:
           HERMES_USER="${{ vars.HERMES_USER }}"; HERMES_USER="${HERMES_USER:-hermes}"
           HERMES_HOME="${{ vars.HERMES_HOME }}"; HERMES_HOME="${HERMES_HOME:-/home/hermes}"
           XIAOMI_REGION="${{ vars.XIAOMI_REGION }}"; XIAOMI_REGION="${XIAOMI_REGION:-sg}"
+          CAMERA_EXPECTED_COUNT="${{ vars.CAMERA_EXPECTED_COUNT }}"; CAMERA_EXPECTED_COUNT="${CAMERA_EXPECTED_COUNT:-3}"
           {
             echo "project_id=${PROJECT_ID}"
             echo "zone=${ZONE}"
@@ -71,6 +71,7 @@ jobs:
             echo "hermes_home=${HERMES_HOME}"
             echo "hermes_config_dir=${HERMES_HOME}/.hermes"
             echo "xiaomi_region=${XIAOMI_REGION}"
+            echo "camera_expected_count=${CAMERA_EXPECTED_COUNT}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Ensure outbound IPv4 egress for WireGuard
@@ -123,6 +124,7 @@ jobs:
           HERMES_HOME: ${{ steps.cfg.outputs.hermes_home }}
           HERMES_CONFIG_DIR: ${{ steps.cfg.outputs.hermes_config_dir }}
           XIAOMI_REGION: ${{ steps.cfg.outputs.xiaomi_region }}
+          CAMERA_EXPECTED_COUNT: ${{ steps.cfg.outputs.camera_expected_count }}
         run: |
           set -euo pipefail
           # shellcheck disable=SC1090
@@ -140,7 +142,10 @@ jobs:
           ${SCP} scripts/install-camera-runtime.sh \
                  scripts/sanitize_wireguard.py \
                  scripts/camera_refresh.py \
+                 scripts/pin_camera_routes.py \
+                 scripts/camera_proxy.py \
                  scripts/camera_api.py \
+                 scripts/hermes-camera-auth.sh \
                  "${SSH_USER}@localhost:/tmp/hermes-camera-runtime/"
           ${SCP} skills/cameras/SKILL.md \
                  "${SSH_USER}@localhost:/tmp/hermes-camera-runtime/skill/SKILL.md"
@@ -152,10 +157,14 @@ jobs:
             HERMES_HOME='${HERMES_HOME}' \
             HERMES_CONFIG_DIR='${HERMES_CONFIG_DIR}' \
             XIAOMI_REGION='${XIAOMI_REGION}' \
+            CAMERA_EXPECTED_COUNT='${CAMERA_EXPECTED_COUNT}' \
             WIREGUARD_CONFIG_SOURCE='/tmp/hermes-camera-runtime/home.conf' \
             SANITIZER_SOURCE='/tmp/hermes-camera-runtime/sanitize_wireguard.py' \
             CAMERA_API_SOURCE='/tmp/hermes-camera-runtime/camera_api.py' \
+            CAMERA_PROXY_SOURCE='/tmp/hermes-camera-runtime/camera_proxy.py' \
             CAMERA_REFRESH_SOURCE='/tmp/hermes-camera-runtime/camera_refresh.py' \
+            CAMERA_ROUTE_PIN_SOURCE='/tmp/hermes-camera-runtime/pin_camera_routes.py' \
+            CAMERA_AUTH_SOURCE='/tmp/hermes-camera-runtime/hermes-camera-auth.sh' \
             CAMERA_SKILL_SOURCE='/tmp/hermes-camera-runtime/skill/SKILL.md' \
             bash /tmp/hermes-camera-runtime/install-camera-runtime.sh"
 
@@ -163,12 +172,23 @@ jobs:
           ${SSH} "sudo -u '${HERMES_USER}' test -x '${ACTIVE_API}'"
           ${SSH} "sudo systemctl is-active --quiet wg-quick@home.service"
           ${SSH} "sudo systemctl is-active --quiet go2rtc.service"
+          ${SSH} "sudo systemctl is-active --quiet hermes-camera-proxy.service"
           ${SSH} "sudo systemctl is-enabled --quiet hermes-camera-refresh.timer"
-          ${SSH} "sudo systemctl is-enabled --quiet hermes-camera-auth.path"
+          ${SSH} "sudo test -S /run/go2rtc/api.sock"
+          ${SSH} "sudo test \"\$(stat -c '%a' /run/go2rtc/api.sock)\" = 660"
+          ${SSH} "sudo -u '${HERMES_USER}' test ! -r /var/lib/go2rtc/go2rtc.yaml"
+          if ${SSH} "sudo -u '${HERMES_USER}' /usr/bin/python3 -c \"import socket; s=socket.socket(socket.AF_UNIX); s.connect('/run/go2rtc/api.sock')\"" 2>/dev/null; then
+            echo "FAIL: Hermes user can access raw go2rtc control socket" >&2
+            exit 1
+          fi
+          if ${SSH} "ss -ltn | awk '{print \$4}' | grep -Eq '(^|:)1984$'"; then
+            echo "FAIL: go2rtc TCP API port 1984 is listening during normal runtime" >&2
+            exit 1
+          fi
           ${SSH} "sudo -u '${HERMES_USER}' env HOME='${HERMES_HOME}' HERMES_HOME='${HERMES_CONFIG_DIR}' /usr/bin/python3 '${ACTIVE_API}' check" \
-            || echo "Camera bridge is installed; Xiaomi one-time authorization may still be required."
+            || echo "Camera boundary is healthy; one-time Xiaomi authorization may still be required."
 
-          echo "Camera bridge ready. For one-time Xiaomi authorization, open an IAP local-forward to 127.0.0.1:1984 as documented in docs/cameras.md."
+          echo "Camera boundary verified: no normal TCP go2rtc API, Hermes cannot access the raw control socket, and snapshots go through the constrained broker."
 
       - name: Remove temporary VM files
         if: always() && steps.camera.outputs.enabled == 'true' && steps.ssh.outcome == 'success'

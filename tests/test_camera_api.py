@@ -1,5 +1,6 @@
 import importlib.util
 import pathlib
+import tempfile
 import unittest
 from unittest import mock
 
@@ -16,12 +17,21 @@ class CameraApiTests(unittest.TestCase):
         self.assertIsNone(MOD.NAME_RE.fullmatch("../camera"))
         self.assertIsNotNone(MOD.NAME_RE.fullmatch("living_room_2"))
 
-    def test_snapshot_rejects_unknown_name_before_fetch(self):
-        with mock.patch.object(MOD, "list_cameras", return_value=["living_room"]), \
-             mock.patch.object(MOD, "request") as request:
-            with self.assertRaisesRegex(ValueError, "unknown camera"):
+    def test_snapshot_rejects_injection_before_broker(self):
+        with mock.patch.object(MOD, "broker_request") as request:
+            with self.assertRaisesRegex(ValueError, "invalid camera name"):
                 MOD.snapshot("living_room?src=xiaomi://evil")
             request.assert_not_called()
+
+    def test_snapshot_writes_only_broker_returned_jpeg(self):
+        image = b"\xff\xd8test\xff\xd9"
+        header = {"ok": True, "camera": "living_room", "captured_at_utc": "20260912T000000Z", "length": len(image)}
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(MOD, "broker_request", return_value=(header, image)), \
+             mock.patch.dict(MOD.os.environ, {"CAMERA_CACHE_DIR": tmp}):
+            result = MOD.snapshot("living_room")
+            self.assertEqual(pathlib.Path(result["path"]).read_bytes(), image)
+            self.assertEqual(pathlib.Path(result["path"]).stat().st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":
