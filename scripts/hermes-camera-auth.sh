@@ -35,6 +35,7 @@ api:
   local_auth: true
   origin: ""
   allow_paths:
+    - /
     - /api/xiaomi
 rtsp:
   listen: ""
