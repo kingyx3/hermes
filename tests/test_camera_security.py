@@ -22,13 +22,16 @@ class CameraSecurityPolicyTests(unittest.TestCase):
         self.assertNotIn("go2rtc", text.lower())
         self.assertIn("AF_UNIX", text)
 
-    def test_auth_window_is_time_limited_and_local_auth_enabled(self):
+    def test_auth_window_is_time_limited_local_auth_and_ui_only(self):
         install = (ROOT / "scripts" / "install-camera-runtime.sh").read_text(encoding="utf-8")
         auth = (ROOT / "scripts" / "hermes-camera-auth.sh").read_text(encoding="utf-8")
         self.assertIn("OnActiveSec=15min", install)
         self.assertIn('listen: "127.0.0.1:1984"', auth)
         self.assertIn("local_auth: true", auth)
         self.assertIn("token_urlsafe(32)", auth)
+        self.assertIn("    - /\n    - /api/xiaomi", auth)
+        self.assertNotIn("/api/streams", auth)
+        self.assertNotIn("/api/frame.mp4", auth)
 
     def test_repo_does_not_contain_wireguard_or_xiaomi_secret_material(self):
         private_key = re.compile(r"PrivateKey\s*=\s*[A-Za-z0-9+/]{40,}={0,2}")
